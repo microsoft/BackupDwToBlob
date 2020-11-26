@@ -111,7 +111,7 @@ This pipeline is used to check if the backup SQL Azure Server exist, and if not 
 
 > All parameters are required and don't have any default values
 
-|Parameter Name | Type | More Info |
+| Parameter Name | Type | More Info |
 | --- | --- | --- | --- |
 | infra_SubscriptionId | SecureString | --  |
 | infra_BackupResourceGroup | SecureString | --  |
@@ -133,7 +133,7 @@ This pipeline will restore the latest restore point from the specified server an
 
 > All parameters are required and don't have any default values
 
-|Parameter Name | Type | More Info |
+| Parameter Name | Type | More Info |
 | --- | --- | --- | --- |
 | infra_SubscriptionId | SecureString | The ID of the subscription where the Azure Synapse database is hosted  |
 | infra_OriginalResourceGroup | SecureString | The name of the resource group that contains the Azure SQL Server which hosts the Azure Synapse Provisioned Pool database to be backed up   |
@@ -185,7 +185,7 @@ SELECT 1;
 
 > All parameters are required and don't have any default values
 
-|Parameter Name | Type | More Info |
+| Parameter Name | Type | More Info |
 | --- | --- | --- | --- |
 | infra_BackupSqlServer | SecureString | --- |
 | synapse_DatabaseBackupName | SecureString | --- |
@@ -219,7 +219,7 @@ The short description is that it connects to the database and get all of the tab
 
 > All parameters are required and don't have any default values
 
-|Parameter Name | Type | More Info |
+| Parameter Name | Type | More Info |
 | --- | --- | --- | --- |
 | infra_BackupSqlServer | SecureString | The fully qualified name of the SQL Server that hosts the backup copy of the Azure Synapse database  |
 | security_AKVBackupUserNameUri | SecureString | The URI to the Azure Key Vault that contains the value of the user name for the Azure Synapse back up database user account |
