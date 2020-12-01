@@ -34,6 +34,16 @@ The following are targeted to be backed up (if not excluded by a schema):
 
 ---
 
+## SELECT 1 - What's up with that?
+
+I did not want to go down the injecting stored procedures into the Azure Synapse Provisioned Pool database, I found it a bit limiting and decided to user _Lookups_ in the pipelines to execute T-SQL on the database, but a lookup always requires a result set. To enable me to use the _lookup_ I ended up adding 
+
+``` SQL
+SELECT 1;
+```
+
+to the end of the _Lookup_ to fulfil its requirements.
+
 ## Pre-Steps
 
 A user cannot be added to a database using the REST APIs, and therefore a user must be pre-staged in the database as per [Create a contained user mapped to Azure AD identities](https://docs.microsoft.com/en-us/azure/azure-sql/database/authentication-aad-configure?tabs=azure-powershell#create-contained-users-mapped-to-azure-ad-identities)
@@ -205,7 +215,6 @@ IF (SELECT COUNT(*) FROM sys.symmetric_keys WHERE [name] LIKE '%DatabaseMasterKe
 BEGIN
     CREATE MASTER KEY ENCRYPTION BY PASSWORD = '@{activity('Get password from AKV').output.value}';
 END
-SELECT 1;
 ```
 
 The following will be added to the **Azure Synapse Provisioned Pool database**:
@@ -222,7 +231,6 @@ WITH (
     FORMAT_TYPE = PARQUET  
       , DATA_COMPRESSION = 'org.apache.hadoop.io.compress.SnappyCodec'  
     );
-SELECT 1;
 ```
 
 > **Kind of note to self...**
@@ -282,7 +290,16 @@ The short description is that it connects to the database and get all of the tab
 
 ### Pipeline: Step 5 - Delete Backup Database
 
-![Step 4](https://ibimages.blob.core.windows.net/public/BackupToBlob/Step5.png)
+![Step 5](https://ibimages.blob.core.windows.net/public/BackupToBlob/Step5.png)
+
+This pipeline will simply delete the Azure Synapse Analytics Provisioned Pool database, you pass it the information and it deletes it for you. Obviously this step should be used with caution as there is no confirmation.
+
+| Parameter Name | Type | More Info |
+| --- | --- | --- |
+| infra_BackupSqlServer | SecureString | The name of the SQL Server that hosts the backup copy of the Azure Synapse database  |
+| synapse_DatabaseBackupName | SecureString | The name of the Azure Synapse database that should be deleted  |
+| infra_SubscriptionId | SecureString | The subscription ID for the account hosting the backup Azure SQL Server  |
+| infra_BackupResourceGroup | SecureString | The name of the resource group that hosts the backup Azure SQL Server  |
 
 ## Contributing
 
