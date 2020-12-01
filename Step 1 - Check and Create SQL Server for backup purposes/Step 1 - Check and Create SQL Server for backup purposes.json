@@ -1,1 +1,341 @@
-{"$schema":"http://schema.management.azure.com/schemas/2015-01-01/deploymentTemplate.json#","contentVersion":"1.0.0.0","parameters":{"factoryName":{"type":"string","metadata":"Data Factory name"}},"variables":{"factoryId":"[concat('Microsoft.DataFactory/factories/', parameters('factoryName'))]"},"resources":[{"name":"[concat(parameters('factoryName'), '/Step 1 - Check and Create SQL Server for backup purposes')]","type":"Microsoft.DataFactory/factories/pipelines","apiVersion":"2018-06-01","properties":{"description":"This pipeline will check if the SQL Server exist for the backup process, and if not create it","activities":[{"name":"Check if backup SQL Server exist","type":"WebActivity","dependsOn":[],"policy":{"timeout":"7.00:00:00","retry":0,"retryIntervalInSeconds":30,"secureOutput":false,"secureInput":false},"userProperties":[],"typeProperties":{"url":{"value":"https://management.azure.com/subscriptions/@{pipeline().parameters.infra_SubscriptionId}/resourceGroups/@{pipeline().parameters.infra_BackupResourceGroup}/providers/Microsoft.Sql/servers/@{pipeline().parameters.infra_BackupSqlServer}?api-version=2019-06-01-preview","type":"Expression"},"method":"GET","headers":{"Content-Type":"application/json"},"body":{"sku":{"name":"DW200c"}},"authentication":{"type":"MSI","resource":"https://management.azure.com/"}}},{"name":"Create backup SQL Server","type":"WebActivity","dependsOn":[{"activity":"Get password from key vault","dependencyConditions":["Succeeded"]}],"policy":{"timeout":"7.00:00:00","retry":0,"retryIntervalInSeconds":30,"secureOutput":false,"secureInput":false},"userProperties":[],"typeProperties":{"url":{"value":"https://management.azure.com/subscriptions/@{pipeline().parameters.infra_SubscriptionId}/resourceGroups/@{pipeline().parameters.infra_BackupResourceGroup}/providers/Microsoft.Sql/servers/@{pipeline().parameters.infra_BackupSqlServer}?api-version=@{pipeline().parameters.infra_ApiVersion}","type":"Expression"},"method":"PUT","headers":{"Content-Type":"application/json"},"body":{"value":"{\"properties\":{\"administratorLogin\": \"backupTemplogin\",\"administratorLoginPassword\": \"@{activity('Get password from key vault').output.value}\"}, \"location\": \"@{pipeline().parameters.infra_Region}\"}","type":"Expression"},"authentication":{"type":"MSI","resource":"https://management.azure.com/"}}},{"name":"Add ADF MSI as the domain admin for the SQL Server","type":"WebActivity","dependsOn":[{"activity":"Create backup SQL Server","dependencyConditions":["Succeeded"]}],"policy":{"timeout":"7.00:00:00","retry":0,"retryIntervalInSeconds":30,"secureOutput":false,"secureInput":false},"userProperties":[],"typeProperties":{"url":{"value":"https://management.azure.com/subscriptions/@{pipeline().parameters.infra_SubscriptionId}/resourceGroups/@{pipeline().parameters.infra_BackupResourceGroup}/providers/Microsoft.Sql/servers/@{pipeline().parameters.infra_BackupSqlServer}/administrators/activeDirectory?api-version=2014-04-01-preview","type":"Expression"},"method":"PUT","headers":{"Content-Type":"application/json"},"body":{"value":"{\"id\": \"/subscriptions/@{pipeline().parameters.infra_SubscriptionId}/resourceGroups/@{pipeline().parameters.infra_BackupResourceGroup}/providers/Microsoft.Sql/servers/@{pipeline().parameters.infra_BackupSqlServer}/administrators/activeDirectory\", \"name\": \"activeDirectory\", \"properties\": {\"administratorType\": \"ActiveDirectory\", \"login\": \"ibBackupDWToBlob\", \"sid\": \"@{pipeline().parameters.security_AdfAppId}\", \"tenantId\": \"@{pipeline().parameters.security_TenantId}\"}}","type":"Expression"},"authentication":{"type":"MSI","resource":"https://management.azure.com/"}}},{"name":"Get password from key vault","description":"Is this step required?","type":"WebActivity","dependsOn":[{"activity":"Check if backup SQL Server exist","dependencyConditions":["Failed"]}],"policy":{"timeout":"7.00:00:00","retry":0,"retryIntervalInSeconds":30,"secureOutput":true,"secureInput":false},"userProperties":[],"typeProperties":{"url":"https://ibdwkeyvault.vault.azure.net/secrets/BackupServer/2bf4e07c82074b839509b0eab89eff0c","method":"GET","headers":{},"authentication":{"type":"MSI","resource":"https://vault.azure.net"}}}],"parameters":{"infra_BackupSqlServer":{"type":"string","defaultValue":"ibdwtestbackupserver"},"synapse_DatabaseTobeBackedUp":{"type":"string","defaultValue":"ibTestBackup"},"synapse_DatabaseBackupName":{"type":"string","defaultValue":"ibTestBackup_Backup"},"infra_SubscriptionId":{"type":"string","defaultValue":"6ac35320-5a8e-4c74-8299-bf40e9cda38c"},"infra_OriginalResourceGroup":{"type":"string","defaultValue":"BackupDW"},"infra_BackupResourceGroup":{"type":"string","defaultValue":"Backup"},"infra_Tags":{"type":"string"},"infra_StorageLocation":{"type":"string"},"synapse_BackupSku":{"type":"string","defaultValue":{"sku":{"name":"DW100c"}}},"infra_OriginalSqlServerName":{"type":"string","defaultValue":"ibdwbacksqlserver"},"infra_ApiVersion":{"type":"string","defaultValue":"2019-06-01-preview"},"security_MsiSid":{"type":"string","defaultValue":"7f6a6bbe-d1db-4d0c-aac7-505055edb98b"},"security_TenantId":{"type":"string","defaultValue":"72f988bf-86f1-41af-91ab-2d7cd011db47"},"security_AdfAppId":{"type":"string","defaultValue":"097b294f-c24a-4878-a892-ea0afde19ab2"},"infra_Region":{"type":"string","defaultValue":"westeurope"}},"variables":{"SynapseDw_SqlServerName":{"type":"String","defaultValue":"ibdwbacksqlserver.database.windows.net"},"SynapseDw_DatabaseName":{"type":"String","defaultValue":"ibTestBackup"},"BlobStore_BackupContainer":{"type":"String","defaultValue":"backup"},"BlobStore_Path":{"type":"String","defaultValue":"ibdwbackup.blob.core.windows.net"},"SynapseDw_BackupType":{"type":"String","defaultValue":"0"},"security_TemporaryPassword":{"type":"String"}},"folder":{"name":"Backup DW"},"annotations":[],"lastPublishTime":"2019-09-19T14:34:59Z"},"dependsOn":[]}]}
+{
+  "$schema": "http://schema.management.azure.com/schemas/2015-01-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "factoryName": {
+      "type": "string",
+      "metadata": "Data Factory name"
+    }
+  },
+  "variables": {
+    "factoryId": "[concat('Microsoft.DataFactory/factories/', parameters('factoryName'))]"
+  },
+  "resources": [
+    {
+      "name": "[concat(parameters('factoryName'), '/Step 1 - Check and Create SQL Server for backup purposes')]",
+      "type": "Microsoft.DataFactory/factories/pipelines",
+      "apiVersion": "2018-06-01",
+      "properties": {
+        "description": "This pipeline will check if the SQL Server exist for the backup process, and if not create it",
+        "activities": [
+          {
+            "name": "Check if backup SQL Server exist",
+            "type": "WebActivity",
+            "dependsOn": [
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": false,
+              "secureInput": false
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "url": {
+                "value": "https://management.azure.com/subscriptions/@{pipeline().parameters.infra_SubscriptionId}/resourceGroups/@{pipeline().parameters.infra_BackupResourceGroup}/providers/Microsoft.Sql/servers/@{pipeline().parameters.infra_BackupSqlServerName}?api-version=2019-06-01-preview",
+                "type": "Expression"
+              },
+              "method": "GET",
+              "headers": {
+                "Content-Type": "application/json"
+              },
+              "body": {
+                "sku": {
+                  "name": "DW200c"
+                }
+              },
+              "authentication": {
+                "type": "MSI",
+                "resource": "https://management.azure.com/"
+              }
+            }
+          },
+          {
+            "name": "Create backup SQL Server",
+            "type": "WebActivity",
+            "dependsOn": [
+              {
+                "activity": "Set user name",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              },
+              {
+                "activity": "Set backup user password",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": true,
+              "secureInput": true
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "url": {
+                "value": "https://management.azure.com/subscriptions/@{pipeline().parameters.infra_SubscriptionId}/resourceGroups/@{pipeline().parameters.infra_BackupResourceGroup}/providers/Microsoft.Sql/servers/@{pipeline().parameters.infra_BackupSqlServerName}?api-version=2019-06-01-preview",
+                "type": "Expression"
+              },
+              "method": "PUT",
+              "headers": {
+                "Content-Type": "application/json"
+              },
+              "body": {
+                "value": "{\n\"properties\":{\n    \"administratorLogin\":\"@{variables('security_BackupServerUserName')}\",\n    \"administratorLoginPassword\": \"@{variables('security_BackupServerPassword')}\",\n    \n    }\n,\"location\": \"@{pipeline().parameters.infra_Region}\",\n\"tags\": {\n      @{pipeline().parameters.infra_Tags}\n    }\n}\n\n",
+                "type": "Expression"
+              },
+              "authentication": {
+                "type": "MSI",
+                "resource": "https://management.azure.com/"
+              }
+            }
+          },
+          {
+            "name": "Add ADF MSI as the domain admin for the SQL Server",
+            "type": "WebActivity",
+            "dependsOn": [
+              {
+                "activity": "Create backup SQL Server",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": true,
+              "secureInput": true
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "url": {
+                "value": "https://management.azure.com/subscriptions/@{pipeline().parameters.infra_SubscriptionId}/resourceGroups/@{pipeline().parameters.infra_BackupResourceGroup}/providers/Microsoft.Sql/servers/@{pipeline().parameters.infra_BackupSqlServerName}/administrators/activeDirectory?api-version=2014-04-01-preview",
+                "type": "Expression"
+              },
+              "method": "PUT",
+              "headers": {
+                "Content-Type": "application/json"
+              },
+              "body": {
+                "value": "{\"id\": \"/subscriptions/@{pipeline().parameters.infra_SubscriptionId}/resourceGroups/@{pipeline().parameters.infra_BackupResourceGroup}/providers/Microsoft.Sql/servers/@{pipeline().parameters.infra_BackupSqlServerName}/administrators/activeDirectory\", \"name\": \"activeDirectory\", \"properties\": {\"administratorType\": \"ActiveDirectory\", \"login\": \"ibBackupDWToBlob\", \"sid\": \"@{pipeline().parameters.security_AdfAppId}\", \"tenantId\": \"@{pipeline().parameters.security_TenantId}\"}}",
+                "type": "Expression"
+              },
+              "authentication": {
+                "type": "MSI",
+                "resource": "https://management.azure.com/"
+              }
+            }
+          },
+          {
+            "name": "Allow All Azure Services Access",
+            "description": "Change the firewall configuration for \"Allow Azure services and resources to access this server\" to Yes.",
+            "type": "WebActivity",
+            "dependsOn": [
+              {
+                "activity": "Add ADF MSI as the domain admin for the SQL Server",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": true,
+              "secureInput": true
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "url": {
+                "value": "https://management.azure.com/subscriptions/@{pipeline().parameters.infra_SubscriptionId}/resourceGroups/@{pipeline().parameters.infra_BackupResourceGroup}/providers/Microsoft.Sql/servers/@{pipeline().parameters.infra_BackupSqlServerName}/firewallRules/AllowAllWindowsAzureIps?api-version=2014-04-01",
+                "type": "Expression"
+              },
+              "method": "PUT",
+              "headers": {
+                "Content-Type": "application/json"
+              },
+              "body": {
+                "properties": {
+                  "startIpAddress": "0.0.0.0",
+                  "endIpAddress": "0.0.0.0"
+                }
+              },
+              "authentication": {
+                "type": "MSI",
+                "resource": "https://management.azure.com/"
+              }
+            }
+          },
+          {
+            "name": "Get backup database user name from AKV",
+            "description": "",
+            "type": "WebActivity",
+            "dependsOn": [
+              {
+                "activity": "Check if backup SQL Server exist",
+                "dependencyConditions": [
+                  "Failed"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": true,
+              "secureInput": true
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "url": {
+                "value": "@pipeline().parameters.security_AKVBackupUserNameUri",
+                "type": "Expression"
+              },
+              "method": "GET",
+              "headers": {
+              },
+              "authentication": {
+                "type": "MSI",
+                "resource": "https://vault.azure.net"
+              }
+            }
+          },
+          {
+            "name": "Get backup database user password from AKV",
+            "type": "WebActivity",
+            "dependsOn": [
+              {
+                "activity": "Check if backup SQL Server exist",
+                "dependencyConditions": [
+                  "Failed"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": true,
+              "secureInput": true
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "url": {
+                "value": "@pipeline().parameters.security_AKVBackupUserPasswordUri",
+                "type": "Expression"
+              },
+              "method": "GET",
+              "headers": {
+              },
+              "authentication": {
+                "type": "MSI",
+                "resource": "https://vault.azure.net"
+              }
+            }
+          },
+          {
+            "name": "Set user name",
+            "type": "SetVariable",
+            "dependsOn": [
+              {
+                "activity": "Get backup database user name from AKV",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "variableName": "security_BackupServerUserName",
+              "value": {
+                "value": "@activity('Get backup database user name from AKV').output.value",
+                "type": "Expression"
+              }
+            }
+          },
+          {
+            "name": "Set backup user password",
+            "type": "SetVariable",
+            "dependsOn": [
+              {
+                "activity": "Get backup database user password from AKV",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "variableName": "security_BackupServerPassword",
+              "value": {
+                "value": "@activity('Get backup database user password from AKV').output.value",
+                "type": "Expression"
+              }
+            }
+          }
+        ],
+        "parameters": {
+          "infra_BackupSqlServerName": {
+            "type": "securestring"
+          },
+          "infra_SubscriptionId": {
+            "type": "securestring"
+          },
+          "infra_BackupResourceGroup": {
+            "type": "securestring"
+          },
+          "infra_Tags": {
+            "type": "securestring"
+          },
+          "infra_Region": {
+            "type": "securestring"
+          },
+          "security_AdfAppId": {
+            "type": "securestring"
+          },
+          "security_AKVBackupUserNameUri": {
+            "type": "securestring"
+          },
+          "security_AKVBackupUserPasswordUri": {
+            "type": "securestring"
+          },
+          "security_TenantId": {
+            "type": "securestring"
+          }
+        },
+        "variables": {
+          "security_BackupServerUserName": {
+            "type": "String"
+          },
+          "security_BackupServerPassword": {
+            "type": "String"
+          }
+        },
+        "folder": {
+          "name": "Backup DW"
+        },
+        "annotations": [
+        ],
+        "lastPublishTime": "2019-09-19T14:34:59Z"
+      },
+      "dependsOn": [
+      ]
+    }
+  ]
+}

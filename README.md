@@ -34,6 +34,25 @@ The following are targeted to be backed up (if not excluded by a schema):
 
 ---
 
+## Pre-Steps
+
+A user cannot be added to a database using the REST APIs, and therefore a user must be pre-staged in the database as per [Create a contained user mapped to Azure AD identities](https://docs.microsoft.com/en-us/azure/azure-sql/database/authentication-aad-configure?tabs=azure-powershell#create-contained-users-mapped-to-azure-ad-identities)
+
+I have opted to use SQL Authentication in this flow. The ideal solution is to stage the ADF MSI in as an Administrator for the Azure Synapse Provisioned Pool database, but for now the flow is not setup for this.
+
+``` SQL
+-- Creates the login MyBackupUser with password 'VerySecuredPassword!123'.  
+CREATE LOGIN MyBackupUser
+    WITH PASSWORD = 'VerySecuredPassword!123';  
+GO  
+
+-- Creates a database user for the login created above.  
+CREATE USER MyBackupUser FOR LOGIN MyBackupUser;  
+GO  
+```
+
+Take the user name and password and add it to your Azure Key Vault, use the _BackupServerUserName_ and _BackupServerUserPassword_ secrets for this.
+
 ## Setup
 
 Here I will describe how to setup the Azure Data Factory as well as all of the surrounding services.
@@ -70,9 +89,9 @@ Use this table to track the backup location for the data warehouse.
 
 ### Azure Key Vault
 
-Azure Key Vault (AKV) is used to secure sensitive information for the complete backup process, and maybe I did go a little overboard with adding control database and server name to the Key Vault, but once you have a pattern established you follow it to it's path of completion!
+Azure Key Vault (AKV) is used to secure sensitive information for the complete backup process, and maybe I did go a little overboard with adding control database and server name to the Key Vault, but once you have a pattern established you follow it to the end!
 
-1. Add the MSI for ADF to your Key Vault as a Contributor.
+1. Add the MSI for ADF to your Key Vault as a Managed Applications Reader.
 2. Add the required secrets
    * BackupBlobStorageLocation
    * BackupDatabaseScopedCredentials
@@ -93,37 +112,46 @@ Azure Key Vault (AKV) is used to secure sensitive information for the complete b
 
 ---
 
-![Main Pipeline](https://ibimages.blob.core.windows.net/public/backupflow.png)
+![Main Pipeline](https://ibimages.blob.core.windows.net/public/BackupToBlob/MainPipeline.png)
 
-This pipeline is used as the master pipeline to execute all of the subsequent steps, from beginning to end. It simply has 4 objects, all 4 being Execute Pipeline.
+This pipeline is used as the master pipeline to execute all of the subsequent steps, from beginning to end. It simply has 5 objects, all 5 being Execute Pipeline.
 
 ---
 
 ### Pipeline: Step 1
 
-![Step 1](https://ibimages.blob.core.windows.net/public/step1.png)
+![Step 1](https://ibimages.blob.core.windows.net/public/BackupToBlob/Step1.png)
 
 > Obviously you can create the Azure SQL Server beforehand and completely skip this step.
 
-This pipeline is used to check if the backup SQL Azure Server exist, and if not create it. Additionally it will add the Azure Data Factory MSI as the domain admin for this SQL Server (Only if this pipeline creates the server).
+This pipeline is used to check if the backup SQL Azure Server exist, and if not, it will create it. Additionally it will add the Azure Data Factory MSI as the domain admin for this SQL Server (Only if this pipeline creates the server) and allow all Azure services to be able to connect to it.
+
+> If the server already exist, then none of the below values would be applied.
 
 #### Step 1 Parameters
 
-> All parameters are required and don't have any default values
+> Almost all parameters are required and don't have any default values
 
 | Parameter Name | Type | More Info |
 | --- | --- | --- |
-| infra_SubscriptionId | SecureString | --  |
-| infra_BackupResourceGroup | SecureString | --  |
-| infra_BackupSqlServer | SecureString | --  |
-| security_AKVSql | SecureString | --  |
+| infra_BackupResourceGroup | SecureString | The already existing resource group that should be used to host the new Azure SQL Server  |
+| infra_BackupSqlServerName | SecureString | A valid name for the new Azure SQL Server.  |
+| infra_Region | SecureString | The region where the new Azure SQL Server must be created  |
+| infra_SubscriptionId | SecureString | The ID of the subscription hosting the original Azure Synapse Provisioned Pool database and the new Azure SQL Server  |
+| infra_Tags | SecureString | The tags that should be added to the new Azure SQL Server, in valid JSON format. A **blank** value is acceptable  |
+| security_AdfAppId | SecureString | The app ID for this Azure Data Factory  |
+| security_TempAdminUserName | SecureString | A valid temporary user name for the SQL admin user |
+| security_TempAdminUserPassword | SecureString | A valid password for the temporary SQL admin user |
+| security_TenantId | SecureString | The tenant ID that hosts the above subscription |
 
+1. The server cannot be created without temporary user name and password, these values can be retrieved from Key Vault.
+2. The infra_Tags must be a valid JSON string in the following format: "tagKey1": "tag-value-1", "tagKey2": "tag-value-2". This value should be left blank to skip adding tags to the server
 
 ---
 
-### Pipeline: Step 2
+### Pipeline: Step 2 - Restore database to backup server
 
-![Step 2](https://ibimages.blob.core.windows.net/public/step2.png)
+![Step 2](https://ibimages.blob.core.windows.net/public/BackupToBlob/Step2.png)
 
 This pipeline will restore the latest restore point from the specified server and database to the specified backup server.
 
@@ -135,17 +163,36 @@ This pipeline will restore the latest restore point from the specified server an
 
 | Parameter Name | Type | More Info |
 | --- | --- | --- |
-| infra_SubscriptionId | SecureString | The ID of the subscription where the Azure Synapse database is hosted  |
+| infra_BackupSqlServerName | SecureString | The name of the Azure SQL Server to use to restore the backup. |
+| infra_BackupResourceGroup | SecureString |   |
 | infra_OriginalResourceGroup | SecureString | The name of the resource group that contains the Azure SQL Server which hosts the Azure Synapse Provisioned Pool database to be backed up   |
-| infra_OriginalSqlServerName | SecureString | The URI of the Azure SQL Server that hosts the Azure Synapse Provisioned Pool database to be backed up   |
+| infra_OriginalSqlServerName | SecureString | The URI of the Azure SQL Server that hosts the Azure Synapse Provisioned Pool database to be backed up |
+| infra_Region | SecureString | The name that the restored database will have.  |
+| infra_SubscriptionId | SecureString | The ID of the subscription where the Azure Synapse database is hosted  |
+| synapse_BackupSku | SecureString | The name that the restored database will have.  |
 | synapse_DatabaseToBeBackedUp | SecureString | The name of the database that should be restored  |
 | synapse_DatabaseBackupName | SecureString | The name that the restored database will have.  |
+
+
+1. Valid values for **synapse_BackupSku** is DW100c, DW200c, DW300c, DW500c, DW1000c, DW1500c and so forth, verify the sizes on the Microsoft Documentation page. (Note that the size will have a direct impact on how long a backup takes and the cost of it)
+2. Additionally this only covers Gen2.
+3. **infra_BackupSqlServerName** should only be the name of the server, not the complete URI.
+
+> Region could have been taken from the original SQL Server, but it has to match up with the created server as well as the original server. (Region was added here to allow the pipelines to be absolutely atomic from each other)
+
+> If you _just_ need a normal backup, you could simply run up to this step and pause the data warehouse at this point.
+
+> To get a list of regions, use:
+>
+>``` PowerShell
+>az account list-locations -o table
+>```
 
 ---
 
 ### Pipeline: Step 3
 
-![Step 3](https://ibimages.blob.core.windows.net/public/step3.png)
+![Step 3](https://ibimages.blob.core.windows.net/public/BackupToBlob/Step3.png)
 
 This pipeline is used to prepare the restored database for back up.
 
@@ -209,7 +256,7 @@ Make sure that should you change the default backup schema, don't use a schema t
 
 ### Pipeline: Step 4 - Capture database info and backup
 
-![Step 4](https://ibimages.blob.core.windows.net/public/step4.png)
+![Step 4](https://ibimages.blob.core.windows.net/public/BackupToBlob/Step4.png)
 
 This is the core of the whole process, this pipeline is used to do the actual backup of the data warehouse and create the scripts to restore the data warehouse. It contains a lot of T-SQL scripts for this and particular attention was paid to make sure that the structures was kept the same in the scripts as was found in the database, this includes the order of the columns as well other structures (This will be expanded to make clear which structures).
 
@@ -232,6 +279,10 @@ The short description is that it connects to the database and get all of the tab
 | sql_BackupSchemaName | SecureString | The value for the backup schema name |
 
 ---
+
+### Pipeline: Step 5 - Delete Backup Database
+
+![Step 4](https://ibimages.blob.core.windows.net/public/BackupToBlob/Step5.png)
 
 ## Contributing
 

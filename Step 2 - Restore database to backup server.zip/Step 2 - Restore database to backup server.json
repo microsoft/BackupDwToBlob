@@ -1,0 +1,116 @@
+{
+  "$schema": "http://schema.management.azure.com/schemas/2015-01-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "factoryName": {
+      "type": "string",
+      "metadata": "Data Factory name"
+    }
+  },
+  "variables": {
+    "factoryId": "[concat('Microsoft.DataFactory/factories/', parameters('factoryName'))]"
+  },
+  "resources": [
+    {
+      "name": "[concat(parameters('factoryName'), '/Step 2 - Restore database to backup server')]",
+      "type": "Microsoft.DataFactory/factories/pipelines",
+      "apiVersion": "2018-06-01",
+      "properties": {
+        "description": "This pipeline will restore the Azure Synapse database to the backup server.",
+        "activities": [
+          {
+            "name": "Restore database to new Server",
+            "type": "WebActivity",
+            "dependsOn": [
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": false,
+              "secureInput": false
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "url": {
+                "value": "https://management.azure.com/subscriptions/@{pipeline().parameters.infra_SubscriptionId}/resourceGroups/@{pipeline().parameters.infra_BackupResourceGroup}/providers/Microsoft.Sql/servers/@{pipeline().parameters.infra_BackupSqlServerName}/databases/@{pipeline().parameters.synapse_DatabaseBackupName}?api-version=2017-10-01-preview",
+                "type": "Expression"
+              },
+              "method": "PUT",
+              "headers": {
+                "Content-Type": "application/json"
+              },
+              "body": {
+                "value": "{\"location\": \"@{pipeline().parameters.infra_Region}\", \"sku\": {\"name\": \"@{pipeline().parameters.synapse_BackupSku}\"}, \"properties\": { \"createMode\": \"Recovery\",  \n\"recoverableDatabaseId\": \"/subscriptions/@{pipeline().parameters.infra_SubscriptionId}/resourceGroups/@{pipeline().parameters.infra_OriginalResourceGroup}/providers/Microsoft.Sql/servers/@{pipeline().parameters.infra_OriginalSqlServerName}/recoverableDatabases/@{pipeline().parameters.synapse_DatabaseTobeBackedUp}\"}}",
+                "type": "Expression"
+              },
+              "authentication": {
+                "type": "MSI",
+                "resource": "https://management.azure.com/"
+              }
+            }
+          }
+        ],
+        "parameters": {
+          "infra_BackupSqlServerName": {
+            "type": "securestring"
+          },
+          "synapse_DatabaseToBeBackedUp": {
+            "type": "securestring"
+          },
+          "synapse_DatabaseBackupName": {
+            "type": "securestring"
+          },
+          "infra_BackupResourceGroup": {
+            "type": "securestring"
+          },
+          "synapse_BackupSku": {
+            "type": "securestring"
+          },
+          "infra_OriginalSqlServerName": {
+            "type": "securestring"
+          },
+          "infra_OriginalResourceGroup": {
+            "type": "securestring"
+          },
+          "infra_Region": {
+            "type": "securestring"
+          },
+          "infra_SubscriptionId": {
+            "type": "securestring"
+          }
+        },
+        "variables": {
+          "SynapseDw_SqlServerName": {
+            "type": "String"
+          },
+          "SynapseDw_DatabaseName": {
+            "type": "String"
+          },
+          "BlobStore_BackupContainer": {
+            "type": "String"
+          },
+          "BlobStore_Path": {
+            "type": "String"
+          },
+          "SynapseDw_BackupType": {
+            "type": "String",
+            "defaultValue": "0"
+          },
+          "security_TemporaryPassword": {
+            "type": "String"
+          }
+        },
+        "folder": {
+          "name": "Backup DW"
+        },
+        "annotations": [
+        ],
+        "lastPublishTime": "2019-09-19T14:34:59Z"
+      },
+      "dependsOn": [
+      ]
+    }
+  ]
+}
