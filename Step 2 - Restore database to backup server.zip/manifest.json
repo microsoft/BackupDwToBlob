@@ -10,7 +10,7 @@
     }
   },
   "documentation": "https://github.com/microsoft/BackupDwToBlob",
-  "author": "moblak@microsoft.com",
+  "author": "Mornè Blake",
   "annotations": [
     "REST API",
     "Restore Data Warehouse Database"

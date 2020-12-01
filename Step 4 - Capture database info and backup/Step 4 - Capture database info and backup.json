@@ -1,0 +1,1790 @@
+{
+  "$schema": "http://schema.management.azure.com/schemas/2015-01-01/deploymentTemplate.json#",
+  "contentVersion": "1.0.0.0",
+  "parameters": {
+    "factoryName": {
+      "type": "string",
+      "metadata": "Data Factory name"
+    },
+    "conn_BackupServer": {
+      "type": "string"
+    },
+    "conn_ControlDb": {
+      "type": "string"
+    }
+  },
+  "variables": {
+    "factoryId": "[concat('Microsoft.DataFactory/factories/', parameters('factoryName'))]"
+  },
+  "resources": [
+    {
+      "name": "[concat(parameters('factoryName'), '/Step 4 - Capture database info and backup')]",
+      "type": "Microsoft.DataFactory/factories/pipelines",
+      "apiVersion": "2018-06-01",
+      "properties": {
+        "activities": [
+          {
+            "name": "Get all tables and prepare for row counts",
+            "type": "Lookup",
+            "dependsOn": [
+              {
+                "activity": "Clean up - if needed",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": true,
+              "secureInput": true
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "source": {
+                "type": "SqlDWSource",
+                "sqlReaderQuery": {
+                  "value": "CREATE TABLE [@{pipeline().parameters.sql_BackupSchemaName}].[tableRowCounts]\nWITH\n(\n DISTRIBUTION = REPLICATE\n ,HEAP\n)\nAS\nSELECT\n\tQUOTENAME(schema_name([tab].[schema_id])) + '.' + QUOTENAME([tab].[name]) as TableName,\n\t0 AS [InternalRowCount],\n\tCONCAT('[@{pipeline().parameters.sql_BackupSchemaName}].',QUOTENAME([tab].[name])) as ExternalTable,\n\t-1 AS ExternalRowCount\nFROM\n\t[sys].[tables] as tab\nINNER JOIN\n\t[sys].[partitions] as part\nON\n\t[tab].[object_id] = [part].[object_id]\nWHERE\n\tschema_name([tab].[schema_id]) NOT IN ('@{pipeline().parameters.sql_BackupSchemaName}', '___ibCreateDb___')\nGROUP BY\n\tQUOTENAME(schema_name([tab].[schema_id])) + '.' + QUOTENAME([tab].[name]),\n\tCONCAT('[@{pipeline().parameters.sql_BackupSchemaName}].',QUOTENAME([tab].[name]))\nOPTION (LABEL = 'BACKUP: Get all tables and prepare for row counts');\nSELECT 1;",
+                  "type": "Expression"
+                },
+                "queryTimeout": "02:00:00",
+                "partitionOption": "None"
+              },
+              "dataset": {
+                "referenceName": "set_blank",
+                "type": "DatasetReference",
+                "parameters": {
+                  "DSBackupServerName": {
+                    "value": "@pipeline().parameters.infra_BackupSqlServer",
+                    "type": "Expression"
+                  },
+                  "DSBackupDatabaseName": {
+                    "value": "@pipeline().parameters.synapse_DatabaseBackupName",
+                    "type": "Expression"
+                  },
+                  "DSBackupUsername": {
+                    "value": "@variables('security_BackupUserName')",
+                    "type": "Expression"
+                  },
+                  "DSBackupUserPassword": {
+                    "value": "@variables('security_BackupUserPassword')",
+                    "type": "Expression"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "name": "Get partitions and partition functions",
+            "type": "Lookup",
+            "dependsOn": [
+              {
+                "activity": "Get all tables and prepare for row counts",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": true,
+              "secureInput": true
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "source": {
+                "type": "SqlDWSource",
+                "sqlReaderQuery": {
+                  "value": "CREATE TABLE [@{pipeline().parameters.sql_BackupSchemaName}].[partitionedTables]\nWITH\n(\n DISTRIBUTION = REPLICATE\n ,HEAP\n)\nAS\nSELECT \n    [pt].[table_name],\n    [si].[index_id],\n    [si].[name] AS index_name,\n    ISNULL([pf].[name], 'NonAligned') AS partition_function,\n    ISNULL([sc].[name], [fg].[name]) AS partition_scheme_or_filegroup,\n    [ic].[partition_ordinal],\n    [ic].[key_ordinal],\n    [ic].[is_included_column],\n    [c].[name] AS column_name,\n    [t].[name] AS data_type_name,\n    [c].[is_identity],\n    [ic].[is_descending_key],\n    [si].[filter_definition]\nFROM (SELECT DISTINCT \n\t\t[t].[object_id],\n\t\t[t].[name] AS table_name\n\tFROM \n\t\t[sys].[tables] AS t\n    JOIN \n\t\t[sys].[indexes] AS si\n\tON\n\t\t[t].[object_id]=[si].[object_id]\n    JOIN \n\t\t[sys].[partition_schemes] AS sc\n\tON\n\t\t[si].[data_space_id]=[sc].[data_space_id]\n\t) AS pt\nJOIN\n\t[sys].[indexes] AS si\nON\n\t[pt].[object_id]=[si].[object_id]\nJOIN\n\t[sys].[index_columns] AS ic\nON\n\t[si].[object_id]=[ic].[object_id]\nAND\n\t[si].[index_id]=[ic].[index_id]\nJOIN\n\t[sys].[columns] AS c\nON\n\t[ic].[object_id]=[c].[object_id]\nAND\n\t[ic].[column_id]=[c].[column_id]\nJOIN \n\t[sys].[types] AS t \nON\n\t[c].[system_type_id]=[t].[system_type_id]\nLEFT JOIN\n\t[sys].[partition_schemes] AS sc \nON\n\t[si].[data_space_id]=[sc].[data_space_id]\nLEFT JOIN\n\t[sys].[partition_functions] AS pf\nON\n\t[sc].[function_id]=[pf].[function_id]\nLEFT JOIN\n\t[sys].[filegroups] as fg\nON\n\t[si].[data_space_id]=[fg].[data_space_id]\nWHERE\n\t[ic].[partition_ordinal] = 1\nOPTION (LABEL = 'ibBACKUP: Get partition information for the tables');\n\n\nCREATE TABLE [@{pipeline().parameters.sql_BackupSchemaName}].[partitionedFunctions]\nWITH\n(\n DISTRIBUTION = REPLICATE\n ,HEAP\n)\nAS\nSELECT \nf.name,\n\t(case when f.boundary_value_on_right=0 then 'LEFT' else 'RIGHT' end) as LeftOrRight, \n\tSTRING_AGG(CAST(v.value as nvarchar(100)), ', ') as PartitionFunctionValues\nFROM  \n\tsys.partition_functions f\ninner join  \n\tsys.partition_range_values v\non \n\tf.function_id = v.function_id\ninner join \n\tsys.partition_parameters p\non f.function_id = p.function_id\ninner join sys.types t\non t.system_type_id = p.system_type_id\nGroup BY f.name, f.boundary_value_on_right\nOPTION (LABEL = 'ibBACKUP: Get partition functions');\n\n\nSELECT 1;",
+                  "type": "Expression"
+                },
+                "queryTimeout": "02:00:00",
+                "partitionOption": "None"
+              },
+              "dataset": {
+                "referenceName": "set_blank",
+                "type": "DatasetReference",
+                "parameters": {
+                  "DSBackupServerName": {
+                    "value": "@pipeline().parameters.infra_BackupSqlServer",
+                    "type": "Expression"
+                  },
+                  "DSBackupDatabaseName": {
+                    "value": "@pipeline().parameters.synapse_DatabaseBackupName",
+                    "type": "Expression"
+                  },
+                  "DSBackupUsername": {
+                    "value": "@variables('security_BackupUserName')",
+                    "type": "Expression"
+                  },
+                  "DSBackupUserPassword": {
+                    "value": "@variables('security_BackupUserPassword')",
+                    "type": "Expression"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "name": "Get schemas",
+            "type": "Lookup",
+            "dependsOn": [
+              {
+                "activity": "Get tables",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": true,
+              "secureInput": true
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "source": {
+                "type": "SqlDWSource",
+                "sqlReaderQuery": {
+                  "value": "CREATE TABLE [@{pipeline().parameters.sql_BackupSchemaName}].[schemas]\nWITH\n(\n DISTRIBUTION = REPLICATE\n ,HEAP\n)\nAS\nSELECT\n\t[name]\nFROM\n\t[sys].[schemas]\nWHERE \n\t[name] NOT IN ('sys','INFORMATION_SCHEMA', 'sysdiag','@{pipeline().parameters.sql_BackupSchemaName}')\nOPTION \n\t(LABEL = 'ibBACKUP: Get schemas');\nSELECT 1;",
+                  "type": "Expression"
+                },
+                "queryTimeout": "02:00:00",
+                "partitionOption": "None"
+              },
+              "dataset": {
+                "referenceName": "set_blank",
+                "type": "DatasetReference",
+                "parameters": {
+                  "DSBackupServerName": {
+                    "value": "@pipeline().parameters.infra_BackupSqlServer",
+                    "type": "Expression"
+                  },
+                  "DSBackupDatabaseName": {
+                    "value": "@pipeline().parameters.synapse_DatabaseBackupName",
+                    "type": "Expression"
+                  },
+                  "DSBackupUsername": {
+                    "value": "@variables('security_BackupUserName')",
+                    "type": "Expression"
+                  },
+                  "DSBackupUserPassword": {
+                    "value": "@variables('security_BackupUserPassword')",
+                    "type": "Expression"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "name": "Get tables column information",
+            "type": "Lookup",
+            "dependsOn": [
+              {
+                "activity": "Get all tables and prepare for row counts",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": true,
+              "secureInput": true
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "source": {
+                "type": "SqlDWSource",
+                "sqlReaderQuery": {
+                  "value": "CREATE TABLE [@{pipeline().parameters.sql_BackupSchemaName}].[TableColumnInfo] \nWITH \n( \n\tDISTRIBUTION = REPLICATE, \n\tHEAP \n) AS \nSELECT \n\tQUOTENAME(schema_name([tbl].[schema_id])) as SchemaName, \n\tQUOTENAME([tbl].[Name]) as Table_Name, \n\t[c].[column_id], \n\tQUOTENAME([c].[name]) as COLUMN_NAME, \n\t[d].[distribution_ordinal], \n\t[ordinal_position], \n\tISNULL('DEFAULT ' + [dc].[definition], '')*1 as DefaultConstraint, \n\t[tdp].[distribution_policy], \n\tCASE [tdp].[distribution_policy] \n\tWHEN 2 THEN \n\t'WITH\n(\n\tDISTRIBUTION = HASH ( ' \n\tWHEN 3 THEN \n\t'WITH\n(\n\tDISTRIBUTION = REPLICATE,' \n\tWHEN 4 THEN \n\t'WITH\n(\n\tDISTRIBUTION = ROUND_ROBIN, ' \n\tEND AS distribution_text, \n\t'[' + CAST([cols].[COLUMN_NAME] AS NVARCHAR(1000)) + '] ' + \n\t\t\t\tCASE [cols].[DATA_TYPE] \n\t\t\t\tWHEN 'binary' THEN \n\t\t\t\tCASE [cols].[CHARACTER_MAXIMUM_LENGTH] \n\t\t\t\t\tWHEN -1 THEN ' binary(MAX)' \n\t\t\t\t\tELSE ' binary(' + CAST([cols].[CHARACTER_MAXIMUM_LENGTH] AS NVARCHAR(1000)) + ')' \n\t\t\t\t\tEND \n\t\t\t\tWHEN 'varbinary' THEN \n\t\t\t\t\tCASE cols.[CHARACTER_MAXIMUM_LENGTH] \n\t\t\t\t\tWHEN -1 THEN ' varbinary(MAX)' \n\t\t\t\t\tELSE ' varbinary(' + CAST([cols].[CHARACTER_MAXIMUM_LENGTH] AS NVARCHAR(1000)) + ')' \n\t\t\t\t\tEND \n\t\t\t\tWHEN 'char' THEN ' char(' + CAST([cols].[CHARACTER_MAXIMUM_LENGTH] AS NVARCHAR(1000)) + ') COLLATE '+ CAST([cols].[collation_name] AS NVARCHAR(1000)) \n\t\t\t\tWHEN 'varchar' THEN \n\t\t\t\t\tCASE cols.[CHARACTER_MAXIMUM_LENGTH] \n\t\t\t\t\tWHEN -1 THEN ' varchar(MAX) COLLATE '+ CAST([cols].[collation_name] AS NVARCHAR(1000)) \n\t\t\t\t\tELSE ' varchar(' + CAST([cols].[CHARACTER_MAXIMUM_LENGTH] AS NVARCHAR(1000)) + ') COLLATE '+ CAST([cols].[collation_name] AS NVARCHAR(1000)) \n\t\t\t\t\tEND \n\t\t\t\tWHEN 'nchar' THEN ' nchar(' + CAST([cols].[CHARACTER_MAXIMUM_LENGTH] AS NVARCHAR(1000)) + ') COLLATE '+ CAST([cols].[collation_name] AS NVARCHAR(1000)) \n\t\t\t\tWHEN 'nvarchar' THEN \n\t\t\t\tCASE cols.[CHARACTER_MAXIMUM_LENGTH] \n\t\t\t\t\tWHEN -1 THEN ' nvarchar(MAX) COLLATE '+ CAST([cols].[collation_name] AS NVARCHAR(1000)) \n\t\t\t\t\tELSE ' nvarchar(' + CAST([cols].[CHARACTER_MAXIMUM_LENGTH] AS NVARCHAR(1000)) + ') COLLATE '+ CAST([cols].[collation_name] AS NVARCHAR(1000)) \n\t\t\t\t\tEND \n\t\t\t\tWHEN 'float' THEN ' float(' + CAST([cols].[NUMERIC_PRECISION] AS NVARCHAR(1000)) + ')' \n\t\t\t\tWHEN 'datetime2' THEN ' datetime2(' + CAST([cols].[DATETIME_PRECISION] AS NVARCHAR(1000)) + ')' \n\t\t\t\tWHEN 'datetimeoffset' THEN ' datetimeoffset(' + CAST([cols].[DATETIME_PRECISION] AS NVARCHAR(1000)) + ')' \n\t\t\t\tWHEN 'time' THEN ' time(' + CAST([cols].[DATETIME_PRECISION] AS NVARCHAR(1000)) + ')' \n\t\t\t\tWHEN 'decimal' THEN ' decimal(' + CAST([cols].[NUMERIC_PRECISION] AS NVARCHAR(1000)) + ', ' + CAST([cols].[NUMERIC_SCALE] AS NVARCHAR(1000)) + ')' \n\t\t\t\tWHEN 'numeric' THEN ' numeric(' + CAST([cols].[NUMERIC_PRECISION] AS NVARCHAR(1000)) + ', ' + CAST([cols].[NUMERIC_SCALE] AS NVARCHAR(1000)) + ')' \n\t\t\t\tELSE [cols].[DATA_TYPE] \n\t\t\t\tEND  \n\t\t\t\t+ CASE [cols].[IS_NULLABLE] \n\t\t\t\tWHEN 'YES' THEN ' NULL' \n\t\t\t\tELSE ' NOT NULL' \n\t\t\t\tEND AS ColumnCreateText \nFROM \n\t[sys].[columns] AS c \nJOIN \n\t[sys].[pdw_column_distribution_properties] AS d \nON \n\t[c].[object_id] = [d].[object_id] \nAND \n\t[c].[column_id] = [d].[column_id] \nJOIN \n\t[sys].[types] AS t \nON \n\t[t].[user_type_id] = [c].[user_type_id] \nLEFT JOIN \n\t[sys].[default_constraints] AS dc \nON \n\t[c].[default_object_id] = [dc].[object_id] \nAND \n\t[c].[object_id] = [dc].[parent_object_id] \nINNER JOIN \n\t[sys].[tables] AS tbl \nON \n\t[tbl].[object_id] = [c].[object_id] \nAND \n\t[tbl].[type] = 'U' \nINNER JOIN \n\t[INFORMATION_SCHEMA].[COLUMNS] as cols \nON \n\tQUOTENAME([cols].[table_name]) = QUOTENAME([tbl].[name]) \nAND \n\tQUOTENAME([cols].[table_Schema]) = QUOTENAME(schema_name([tbl].[schema_id])) \nAND \n\tQUOTENAME([cols].[column_name]) = QUOTENAME([c].[name]) \nINNER JOIN \n\t[sys].[pdw_table_distribution_properties] AS tdp \nON \n\t[tdp].[object_id] = [tbl].[object_id] \nWHERE \n\tschema_name([tbl].[schema_id])  NOT IN ('sys','INFORMATION_SCHEMA', 'sysdiag','@{pipeline().parameters.sql_BackupSchemaName}') \nOPTION \n\t(LABEL = 'ibBACKUP: Get table column information');\nSELECT 1;\n",
+                  "type": "Expression"
+                },
+                "queryTimeout": "02:00:00",
+                "partitionOption": "None"
+              },
+              "dataset": {
+                "referenceName": "set_blank",
+                "type": "DatasetReference",
+                "parameters": {
+                  "DSBackupServerName": {
+                    "value": "@pipeline().parameters.infra_BackupSqlServer",
+                    "type": "Expression"
+                  },
+                  "DSBackupDatabaseName": {
+                    "value": "@pipeline().parameters.synapse_DatabaseBackupName",
+                    "type": "Expression"
+                  },
+                  "DSBackupUsername": {
+                    "value": "@variables('security_BackupUserName')",
+                    "type": "Expression"
+                  },
+                  "DSBackupUserPassword": {
+                    "value": "@variables('security_BackupUserPassword')",
+                    "type": "Expression"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "name": "Get tables",
+            "type": "Lookup",
+            "dependsOn": [
+              {
+                "activity": "Get tables column information",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": false,
+              "secureInput": true
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "source": {
+                "type": "SqlDWSource",
+                "sqlReaderQuery": {
+                  "value": "CREATE TABLE [@{pipeline().parameters.sql_BackupSchemaName}].[Tables] \nWITH \n( \n\tDISTRIBUTION = REPLICATE, \n\tHEAP \n) AS \nSELECT \n\tDISTINCT [SchemaName], \n\t[Table_Name], \n\t[distribution_policy], \n\tCASE \n\t\tWHEN [distribution_policy] = 2 THEN 'WITH (DISTRIBUTION = HASH (' + (SELECT STRING_AGG ([COLUMN_NAME] , ', ') WITHIN GROUP (ORDER BY [SchemaName], [TABLE_NAME] ASC) AS [Columns] FROM [@{pipeline().parameters.sql_BackupSchemaName}].[TableColumnInfo] AS b WHERE [a].[SchemaName] = [b].[SchemaName] AND [a].[Table_Name] = [b].[Table_Name] AND [distribution_ordinal] = 1   GROUP BY [SchemaName],[TABLE_NAME]) + '), HEAP)' \n\t\tWHEN [distribution_policy] = 3 THEN 'WITH (DISTRIBUTION = REPLICATE, HEAP)' \n\t\tWHEN [distribution_policy] = 4 THEN 'WITH (DISTRIBUTION = ROUND_ROBIN, HEAP)' \n\tEND AS Distr, \n\t(SELECT STRING_AGG ([ColumnCreateText] , ', ') WITHIN GROUP (ORDER BY [SchemaName], [TABLE_NAME] ASC) AS [Columns] FROM [@{pipeline().parameters.sql_BackupSchemaName}].[TableColumnInfo] AS b WHERE [a].[SchemaName] = [b].[SchemaName] AND [a].[Table_Name] = [b].[Table_Name]  GROUP BY [SchemaName],[TABLE_NAME]) AS Cols \nFROM \n\t[@{pipeline().parameters.sql_BackupSchemaName}].[TableColumnInfo] AS a \nOPTION \n\t(LABEL = 'ibBACKUP: Create table creation information');\nSELECT 1;",
+                  "type": "Expression"
+                },
+                "queryTimeout": "02:00:00",
+                "partitionOption": "None"
+              },
+              "dataset": {
+                "referenceName": "set_blank",
+                "type": "DatasetReference",
+                "parameters": {
+                  "DSBackupServerName": {
+                    "value": "@pipeline().parameters.infra_BackupSqlServer",
+                    "type": "Expression"
+                  },
+                  "DSBackupDatabaseName": {
+                    "value": "@pipeline().parameters.synapse_DatabaseBackupName",
+                    "type": "Expression"
+                  },
+                  "DSBackupUsername": {
+                    "value": "@variables('security_BackupUserName')",
+                    "type": "Expression"
+                  },
+                  "DSBackupUserPassword": {
+                    "value": "@variables('security_BackupUserPassword')",
+                    "type": "Expression"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "name": "Get CCI",
+            "type": "Lookup",
+            "dependsOn": [
+              {
+                "activity": "Get tables",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": true,
+              "secureInput": true
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "source": {
+                "type": "SqlDWSource",
+                "sqlReaderQuery": {
+                  "value": "CREATE TABLE [@{pipeline().parameters.sql_BackupSchemaName}].[TablesCcis] \nWITH \n( \n\tDISTRIBUTION = REPLICATE, \n\tHEAP \n) AS \nSELECT \n\t\tschema_name([tbl].[schema_id]) AS SchemaName, \n\t\t[tbl].[name] AS TableName, \n\t\t'CREATE CLUSTERED COLUMNSTORE INDEX ' + QUOTENAME([ix].[name]) + ' ON ' + QUOTENAME(schema_name([tbl].[schema_id])) + '.'  + QUOTENAME([tbl].[name]) + ' ORDER (' + STRING_AGG(QUOTENAME([c].[name]), ', ') WITHIN GROUP (ORDER BY [column_store_order_ordinal] ASC) + ');' AS CreateIndexText \n\tFROM \n\t\t[sys].[indexes] AS ix \n\tINNER JOIN \n\t\t[sys].[tables] AS tbl \n\tON \n\t\t[tbl].[object_id]=[ix].[object_id] \n\tAND \n\t\t[tbl].[type] = 'U' \n\tINNER JOIN \n\t\t[sys].[index_columns] AS col \n\tON \n\t\t[ix].[object_id] = [col].[object_id] \n\tLEFT JOIN \n\t\t[sys].[columns] AS c \n\tON \n\t\t[c].[column_id] = [col].[column_id] \n\tAND \n\t\t[c].[object_id] = [col].[object_id] \n\tWHERE \n\t\t[ix].[type] = 5 \n\tAND \n\t\t[column_store_order_ordinal] > 0 \n\tGROUP BY \n\t\tschema_name([tbl].[schema_id]) ,[tbl].[name], [ix].[name] \n\tUNION ALL \n\tSELECT \n\t\tschema_name([tbl].[schema_id]) AS SchemaName, \n\t\t[tbl].[name] AS TableName, \n\t\t'CREATE CLUSTERED COLUMNSTORE INDEX ' + QUOTENAME([ix].[name]) + ' ON ' + QUOTENAME(schema_name([tbl].[schema_id])) + '.'  + QUOTENAME([tbl].[name])  + ');' AS CreateIndexText \n\tFROM \n\t\t[sys].[indexes] AS ix \n\tINNER JOIN \n\t\t[sys].[tables] AS tbl \n\tON \n\t\t[tbl].[object_id]=[ix].[object_id] \n\tAND \n\t\t[tbl].[type] = 'U' \n\tINNER JOIN \n\t\t[sys].[index_columns] AS col \n\tON \n\t\t[ix].[object_id] = [col].[object_id] \n\tLEFT JOIN \n\t\t[sys].[columns] AS c \n\tON \n\t\t[c].[column_id] = [col].[column_id] \n\tAND \n\t\t[c].[object_id] = [col].[object_id] \n\tWHERE \n\t\t[ix].[type] = 5 \n\tAND \n\t\t[column_store_order_ordinal] = 0 \n\tGROUP BY \n\t\tschema_name([tbl].[schema_id]) ,[tbl].[name] , [ix].[name] \n\tOPTION \n\t\t(LABEL = 'ibBACKUP: Get clustered column store indexes');\nSELECT 1;",
+                  "type": "Expression"
+                },
+                "queryTimeout": "02:00:00",
+                "partitionOption": "None"
+              },
+              "dataset": {
+                "referenceName": "set_blank",
+                "type": "DatasetReference",
+                "parameters": {
+                  "DSBackupServerName": {
+                    "value": "@pipeline().parameters.infra_BackupSqlServer",
+                    "type": "Expression"
+                  },
+                  "DSBackupDatabaseName": {
+                    "value": "@pipeline().parameters.synapse_DatabaseBackupName",
+                    "type": "Expression"
+                  },
+                  "DSBackupUsername": {
+                    "value": "@variables('security_BackupUserName')",
+                    "type": "Expression"
+                  },
+                  "DSBackupUserPassword": {
+                    "value": "@variables('security_BackupUserPassword')",
+                    "type": "Expression"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "name": "Clean up - if needed",
+            "type": "Lookup",
+            "dependsOn": [
+              {
+                "activity": "Set user name",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              },
+              {
+                "activity": "Set backup user password",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              },
+              {
+                "activity": "Set Server name and backup name",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": true,
+              "secureInput": true
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "source": {
+                "type": "SqlDWSource",
+                "sqlReaderQuery": {
+                  "value": "\nIF Object_id('[@{pipeline().parameters.sql_BackupSchemaName}].[partitioned_Tables]') IS NOT NULL \nBEGIN \n    DROP TABLE [@{pipeline().parameters.sql_BackupSchemaName}].[partitioned_Tables]; \nEND\nIF Object_id('[@{pipeline().parameters.sql_BackupSchemaName}].[partitionedFunctions]') IS NOT NULL \nBEGIN \n    DROP TABLE [@{pipeline().parameters.sql_BackupSchemaName}].[partitionedFunctions]; \nEND\nIF Object_id('[@{pipeline().parameters.sql_BackupSchemaName}].[partitionedTables]') IS NOT NULL \nBEGIN \n    DROP TABLE [@{pipeline().parameters.sql_BackupSchemaName}].[partitionedTables]; \nEND\nIF Object_id('[@{pipeline().parameters.sql_BackupSchemaName}].[schemas]') IS NOT NULL \nBEGIN \n    DROP TABLE [@{pipeline().parameters.sql_BackupSchemaName}].[schemas]; \nEND\nIF Object_id('[@{pipeline().parameters.sql_BackupSchemaName}].[TableColumnInfo]') IS NOT NULL \nBEGIN \n    DROP TABLE [@{pipeline().parameters.sql_BackupSchemaName}].[TableColumnInfo]; \nEND\nIF Object_id('[@{pipeline().parameters.sql_BackupSchemaName}].[tableRowCounts]') IS NOT NULL \nBEGIN \n    DROP TABLE [@{pipeline().parameters.sql_BackupSchemaName}].[tableRowCounts]; \nEND\nIF Object_id('[@{pipeline().parameters.sql_BackupSchemaName}].[Tables]') IS NOT NULL \nBEGIN \n    DROP TABLE [@{pipeline().parameters.sql_BackupSchemaName}].[Tables]; \nEND\nIF Object_id('[@{pipeline().parameters.sql_BackupSchemaName}].[TablesCcis]') IS NOT NULL \nBEGIN \n    DROP TABLE [@{pipeline().parameters.sql_BackupSchemaName}].[TablesCcis]; \nEND\nIF Object_id('[@{pipeline().parameters.sql_BackupSchemaName}].[TableStatInfo]') IS NOT NULL \nBEGIN \n    DROP TABLE [@{pipeline().parameters.sql_BackupSchemaName}].[TableStatInfo]; \nEND\nIF Object_id('[@{pipeline().parameters.sql_BackupSchemaName}].[Views]') IS NOT NULL \nBEGIN \n    DROP TABLE [@{pipeline().parameters.sql_BackupSchemaName}].[Views]; \nEND\nIF Object_id('[@{pipeline().parameters.sql_BackupSchemaName}].[StoredProcedures]') IS NOT NULL \nBEGIN \n    DROP TABLE [@{pipeline().parameters.sql_BackupSchemaName}].[StoredProcedures]; \nEND\nIF Object_id('[@{pipeline().parameters.sql_BackupSchemaName}].[UserFunctions]') IS NOT NULL \nBEGIN \n    DROP TABLE [@{pipeline().parameters.sql_BackupSchemaName}].[UserFunctions]; \nEND\nIF Object_id('[@{pipeline().parameters.sql_BackupSchemaName}].[BackupLocation]') IS NOT NULL \nBEGIN \n    DROP TABLE  [@{pipeline().parameters.sql_BackupSchemaName}].[BackupLocation]; \nEND\nIF Object_id('[___ibCreateDb___].[partitionedFunctions]') IS NOT NULL \nBEGIN \n    DROP EXTERNAL TABLE  [___ibCreateDb___].[partitionedFunctions]; \nEND\nIF Object_id('[___ibCreateDb___].[partitionedTables]') IS NOT NULL \nBEGIN \n    DROP EXTERNAL TABLE  [___ibCreateDb___].[partitionedTables]; \nEND\nIF Object_id('[___ibCreateDb___].[schemas]') IS NOT NULL \nBEGIN \n    DROP EXTERNAL TABLE  [___ibCreateDb___].[schemas]; \nEND\nIF Object_id('[___ibCreateDb___].[StoredProcedures]') IS NOT NULL \nBEGIN \n    DROP EXTERNAL TABLE  [___ibCreateDb___].[StoredProcedures]; \nEND\nIF Object_id('[___ibCreateDb___].[TableColumnInfo]') IS NOT NULL \nBEGIN \n    DROP EXTERNAL TABLE  [___ibCreateDb___].[TableColumnInfo]; \nEND\nIF Object_id('[___ibCreateDb___].[tableRowCounts]') IS NOT NULL \nBEGIN \n    DROP EXTERNAL TABLE  [___ibCreateDb___].[tableRowCounts]; \nEND\nIF Object_id('[___ibCreateDb___].[Tables]') IS NOT NULL \nBEGIN \n    DROP EXTERNAL TABLE  [___ibCreateDb___].[Tables]; \nEND\nIF Object_id('[___ibCreateDb___].[TablesCcis]') IS NOT NULL \nBEGIN \n    DROP EXTERNAL TABLE  [___ibCreateDb___].[TablesCcis]; \nEND\nIF Object_id('[___ibCreateDb___].[TableStatInfo]') IS NOT NULL \nBEGIN \n    DROP EXTERNAL TABLE  [___ibCreateDb___].[TableStatInfo]; \nEND\nIF Object_id('[___ibCreateDb___].[UserFunctions]') IS NOT NULL \nBEGIN \n    DROP EXTERNAL TABLE  [___ibCreateDb___].[UserFunctions]; \nEND\nIF Object_id('[___ibCreateDb___].[Views]') IS NOT NULL \nBEGIN \n    DROP EXTERNAL TABLE  [___ibCreateDb___].[Views]; \nEND\n\nSELECT 1;\n\n",
+                  "type": "Expression"
+                },
+                "queryTimeout": "02:00:00",
+                "partitionOption": "None"
+              },
+              "dataset": {
+                "referenceName": "set_blank",
+                "type": "DatasetReference",
+                "parameters": {
+                  "DSBackupServerName": {
+                    "value": "@pipeline().parameters.infra_BackupSqlServer",
+                    "type": "Expression"
+                  },
+                  "DSBackupDatabaseName": {
+                    "value": "@pipeline().parameters.synapse_DatabaseBackupName",
+                    "type": "Expression"
+                  },
+                  "DSBackupUsername": {
+                    "value": "@variables('security_BackupUserName')",
+                    "type": "Expression"
+                  },
+                  "DSBackupUserPassword": {
+                    "value": "@variables('security_BackupUserPassword')",
+                    "type": "Expression"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "name": "Get statistics",
+            "type": "Lookup",
+            "dependsOn": [
+              {
+                "activity": "Get tables",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": true,
+              "secureInput": true
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "source": {
+                "type": "SqlDWSource",
+                "sqlReaderQuery": {
+                  "value": "CREATE TABLE [@{pipeline().parameters.sql_BackupSchemaName}].[TableStatInfo]\nWITH\n(\n\tDISTRIBUTION = REPLICATE,\n\tHEAP\n) AS \nSELECT \n\tQUOTENAME(schema_name([tbl].[schema_id])) AS schema_name, \n\tQUOTENAME([tbl].[name]) AS table_name,\n\tQUOTENAME([s].[name]) AS stat_name, \n\t[sc].[stats_column_id], \n\tQUOTENAME([c].[name]) AS column_name\nFROM\n\t[sys].[stats] AS s  \nINNER JOIN\n\t[sys].[tables] AS tbl\nON\n\t[tbl].[object_id]=s.[object_id]\nAND\n\t[tbl].[type] = 'U'  \nJOIN \n\t[sys].[stats_columns] AS sc\nON\n\ts.[stats_id] = [sc].[stats_id] \nAND \n\ts.[object_id] = [sc].[object_id]  \nJOIN \n\t[sys].[columns] AS c \nON \n\t[c].[column_id] = [sc].[column_id]\nAND\n\t[c].[object_id] = [sc].[object_id]\nWHERE\n\tQUOTENAME(schema_name([tbl].[schema_id])) NOT IN ('[@{pipeline().parameters.sql_BackupSchemaName}]')\nOPTION \n\t(LABEL = 'ibBACKUP: Get all statistics, including system created');\nSELECT 1;",
+                  "type": "Expression"
+                },
+                "queryTimeout": "02:00:00",
+                "partitionOption": "None"
+              },
+              "dataset": {
+                "referenceName": "set_blank",
+                "type": "DatasetReference",
+                "parameters": {
+                  "DSBackupServerName": {
+                    "value": "@pipeline().parameters.infra_BackupSqlServer",
+                    "type": "Expression"
+                  },
+                  "DSBackupDatabaseName": {
+                    "value": "@pipeline().parameters.synapse_DatabaseBackupName",
+                    "type": "Expression"
+                  },
+                  "DSBackupUsername": {
+                    "value": "@variables('security_BackupUserName')",
+                    "type": "Expression"
+                  },
+                  "DSBackupUserPassword": {
+                    "value": "@variables('security_BackupUserPassword')",
+                    "type": "Expression"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "name": "Get views and stored procedures and UDF",
+            "type": "Lookup",
+            "dependsOn": [
+              {
+                "activity": "Get tables column information",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": true,
+              "secureInput": true
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "source": {
+                "type": "SqlDWSource",
+                "sqlReaderQuery": {
+                  "value": "CREATE TABLE [@{pipeline().parameters.sql_BackupSchemaName}].[Views]\nWITH\n(\n\tDISTRIBUTION = REPLICATE,\n\tHEAP\n) AS \nSELECT \n\t[c].[definition], \n\tquotename([b].[name]) + '.' + quotename([a].[name]) AS ObjectName\nFROM\n\t[sys].[sql_modules] AS c\nINNER JOIN \n\t[sys].[objects] AS a \nON\n\t[a].[object_id] = [c].[object_id]\nINNER JOIN\n\t[sys].[schemas] AS b\nON \n\t[a].[schema_id] = [b].[schema_id]\nWHERE\n\t[type] = 'V'\nOPTION \n\t(LABEL = 'ibBACKUP: Get all user created views');\n\n\nCREATE TABLE [@{pipeline().parameters.sql_BackupSchemaName}].[StoredProcedures]\nWITH\n(\n\tDISTRIBUTION = REPLICATE,\n\tHEAP\n) AS \nSELECT \n\t[c].[definition], \n\tquotename([b].[name]) + '.' + quotename([a].[name]) AS ObjectName\nFROM\n\t[sys].[sql_modules] AS c\nINNER JOIN \n\t[sys].[objects] AS a \nON\n\t[a].[object_id] = [c].[object_id]\nINNER JOIN\n\t[sys].[schemas] AS b\nON \n\t[a].[schema_id] = [b].[schema_id]\nWHERE\n\t[type] = 'P'\nOPTION \n\t(LABEL = 'ibBACKUP: Get all user stored procedures');\n\n\nCREATE TABLE [@{pipeline().parameters.sql_BackupSchemaName}].[UserFunctions]\nWITH\n(\n\tDISTRIBUTION = REPLICATE,\n\tHEAP\n) AS \nSELECT \n\t[c].[definition], \n\tquotename([b].[name]) + '.' + quotename([a].[name]) AS ObjectName\nFROM\n\t[sys].[sql_modules] AS c\nINNER JOIN \n\t[sys].[objects] AS a \nON\n\t[a].[object_id] = [c].[object_id]\nINNER JOIN\n\t[sys].[schemas] AS b\nON \n\t[a].[schema_id] = [b].[schema_id]\nWHERE\n\t[type] = 'FN'\nOPTION \n\t(LABEL = 'ibBACKUP: Get all user defined functions');\n\nSELECT 1;",
+                  "type": "Expression"
+                },
+                "queryTimeout": "02:00:00",
+                "partitionOption": "None"
+              },
+              "dataset": {
+                "referenceName": "set_blank",
+                "type": "DatasetReference",
+                "parameters": {
+                  "DSBackupServerName": {
+                    "value": "@pipeline().parameters.infra_BackupSqlServer",
+                    "type": "Expression"
+                  },
+                  "DSBackupDatabaseName": {
+                    "value": "@pipeline().parameters.synapse_DatabaseBackupName",
+                    "type": "Expression"
+                  },
+                  "DSBackupUsername": {
+                    "value": "@variables('security_BackupUserName')",
+                    "type": "Expression"
+                  },
+                  "DSBackupUserPassword": {
+                    "value": "@variables('security_BackupUserPassword')",
+                    "type": "Expression"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "name": "Drop External tables",
+            "type": "ForEach",
+            "dependsOn": [
+              {
+                "activity": "Get a list of external tables to drop",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "items": {
+                "value": "@activity('Get a list of external tables to drop').output.value",
+                "type": "Expression"
+              },
+              "activities": [
+                {
+                  "name": "Drop external table if it exists",
+                  "type": "Lookup",
+                  "dependsOn": [
+                  ],
+                  "policy": {
+                    "timeout": "7.00:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": true,
+                    "secureInput": true
+                  },
+                  "userProperties": [
+                  ],
+                  "typeProperties": {
+                    "source": {
+                      "type": "SqlDWSource",
+                      "sqlReaderQuery": {
+                        "value": "@{item().DropCommand};\nSELECT 1;",
+                        "type": "Expression"
+                      },
+                      "queryTimeout": "02:00:00",
+                      "partitionOption": "None"
+                    },
+                    "dataset": {
+                      "referenceName": "set_blank",
+                      "type": "DatasetReference",
+                      "parameters": {
+                        "DSBackupServerName": {
+                          "value": "@pipeline().parameters.infra_BackupSqlServer",
+                          "type": "Expression"
+                        },
+                        "DSBackupDatabaseName": {
+                          "value": "@pipeline().parameters.synapse_DatabaseBackupName",
+                          "type": "Expression"
+                        },
+                        "DSBackupUsername": {
+                          "value": "@variables('security_BackupUserName')",
+                          "type": "Expression"
+                        },
+                        "DSBackupUserPassword": {
+                          "value": "@variables('security_BackupUserPassword')",
+                          "type": "Expression"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "name": "Get a list of external tables to drop",
+            "type": "Lookup",
+            "dependsOn": [
+              {
+                "activity": "Get schemas",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              },
+              {
+                "activity": "Get CCI",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              },
+              {
+                "activity": "Get statistics",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              },
+              {
+                "activity": "Get views and stored procedures and UDF",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              },
+              {
+                "activity": "Get partitions and partition functions",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": true,
+              "secureInput": true
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "source": {
+                "type": "SqlDWSource",
+                "sqlReaderQuery": {
+                  "value": "SELECT \nCONCAT('IF Object_id(''[@{pipeline().parameters.sql_BackupSchemaName}].',Table_Name ,''') IS NOT NULL BEGIN DROP EXTERNAL TABLE ','@{pipeline().parameters.sql_BackupSchemaName}.',Table_Name,' END;') as DropCommand\nFROM [@{pipeline().parameters.sql_BackupSchemaName}].[Tables]",
+                  "type": "Expression"
+                },
+                "queryTimeout": "02:00:00",
+                "partitionOption": "None"
+              },
+              "dataset": {
+                "referenceName": "set_blank",
+                "type": "DatasetReference",
+                "parameters": {
+                  "DSBackupServerName": {
+                    "value": "@pipeline().parameters.infra_BackupSqlServer",
+                    "type": "Expression"
+                  },
+                  "DSBackupDatabaseName": {
+                    "value": "@pipeline().parameters.synapse_DatabaseBackupName",
+                    "type": "Expression"
+                  },
+                  "DSBackupUsername": {
+                    "value": "@variables('security_BackupUserName')",
+                    "type": "Expression"
+                  },
+                  "DSBackupUserPassword": {
+                    "value": "@variables('security_BackupUserPassword')",
+                    "type": "Expression"
+                  }
+                }
+              },
+              "firstRowOnly": false
+            }
+          },
+          {
+            "name": "Backup Tables",
+            "type": "ForEach",
+            "dependsOn": [
+              {
+                "activity": "Get info to backup tables to external BLOB",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "items": {
+                "value": "@activity('Get info to backup tables to external BLOB').output.value",
+                "type": "Expression"
+              },
+              "activities": [
+                {
+                  "name": "Export table to BLOB",
+                  "type": "Lookup",
+                  "dependsOn": [
+                  ],
+                  "policy": {
+                    "timeout": "7.00:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": true,
+                    "secureInput": true
+                  },
+                  "userProperties": [
+                  ],
+                  "typeProperties": {
+                    "source": {
+                      "type": "SqlDWSource",
+                      "sqlReaderQuery": {
+                        "value": "@{item().BackupCommand}; SELECT 1;",
+                        "type": "Expression"
+                      },
+                      "queryTimeout": "02:00:00",
+                      "partitionOption": "None"
+                    },
+                    "dataset": {
+                      "referenceName": "set_blank",
+                      "type": "DatasetReference",
+                      "parameters": {
+                        "DSBackupServerName": {
+                          "value": "@pipeline().parameters.infra_BackupSqlServer",
+                          "type": "Expression"
+                        },
+                        "DSBackupDatabaseName": {
+                          "value": "@pipeline().parameters.synapse_DatabaseBackupName",
+                          "type": "Expression"
+                        },
+                        "DSBackupUsername": {
+                          "value": "@variables('security_BackupUserName')",
+                          "type": "Expression"
+                        },
+                        "DSBackupUserPassword": {
+                          "value": "@variables('security_BackupUserPassword')",
+                          "type": "Expression"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "name": "Get info to backup tables to external BLOB",
+            "type": "Lookup",
+            "dependsOn": [
+              {
+                "activity": "Drop External tables",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": true,
+              "secureInput": true
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "source": {
+                "type": "SqlDWSource",
+                "sqlReaderQuery": {
+                  "value": "DECLARE @d DATETIME = GETDATE(); \n\nCREATE TABLE [@{pipeline().parameters.sql_BackupSchemaName}].[BackupLocation]\nWITH\n(\n\tDISTRIBUTION = REPLICATE,\n\tHEAP\n) AS \nSELECT FORMAT( @d, 'yyyy/MM/dd/hh/mm', 'en-US' ) AS BackupLocation;\n\n\nSELECT \n\tCONCAT('CREATE EXTERNAL TABLE  [@{pipeline().parameters.sql_BackupSchemaName}].',Table_Name, ' WITH\n(LOCATION=''/Backup/',FORMAT( @d, 'yyyy/MM/dd/hh/mm', 'en-US' ),'/', '@{variables('infra_ServerNameAndDatabase')}', '/', [SchemaName], '.', Table_Name,'/'',   DATA_SOURCE = [@{pipeline().parameters.sql_BackupSchemaName}BackupBlobStorage], FILE_FORMAT = Backup_FileFormat, REJECT_TYPE = VALUE, REJECT_VALUE = 0)', ' AS SELECT * FROM ', [SchemaName], '.', [Table_Name],';')  AS BackupCommand\nFROM [@{pipeline().parameters.sql_BackupSchemaName}].[Tables]\n\n",
+                  "type": "Expression"
+                },
+                "queryTimeout": "02:00:00",
+                "partitionOption": "None"
+              },
+              "dataset": {
+                "referenceName": "set_blank",
+                "type": "DatasetReference",
+                "parameters": {
+                  "DSBackupServerName": {
+                    "value": "@pipeline().parameters.infra_BackupSqlServer",
+                    "type": "Expression"
+                  },
+                  "DSBackupDatabaseName": {
+                    "value": "@pipeline().parameters.synapse_DatabaseBackupName",
+                    "type": "Expression"
+                  },
+                  "DSBackupUsername": {
+                    "value": "@variables('security_BackupUserName')",
+                    "type": "Expression"
+                  },
+                  "DSBackupUserPassword": {
+                    "value": "@variables('security_BackupUserPassword')",
+                    "type": "Expression"
+                  }
+                }
+              },
+              "firstRowOnly": false
+            }
+          },
+          {
+            "name": "Get the re-creation scripts",
+            "type": "Lookup",
+            "dependsOn": [
+              {
+                "activity": "Update rowcounts",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": true,
+              "secureInput": true
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "source": {
+                "type": "SqlDWSource",
+                "sqlReaderQuery": {
+                  "value": "IF Object_id('[___ibCreateDb___].[ExportList]') IS NOT NULL \nBEGIN \n    DROP TABLE [___ibCreateDb___].[ExportList]; \nEND\n\nCREATE TABLE [___ibCreateDb___].[ExportList]\n(\n\t[ExportList] [nvarchar](4000) NULL\n)\nWITH\n(\n\tDISTRIBUTION = REPLICATE,\n\tHEAP\n)\n\nDECLARE @backupLocation NVARCHAR(4000)\nSELECT TOP 1 @backupLocation = [BackupLocation] FROM  [@{pipeline().parameters.sql_BackupSchemaName}].[BackupLocation];\n\nDECLARE @command NVARCHAR(4000)\nSET @command = CONCAT('CREATE EXTERNAL TABLE [___ibCreateDb___].[partitionedFunctions] WITH  (LOCATION=''/Backup/',@backupLocation,'/@{variables('infra_ServerNameAndDatabase')}/CreationScripts/[partitionedFunctions]/'', DATA_SOURCE = [@{pipeline().parameters.sql_BackupSchemaName}BackupBlobStorage], FILE_FORMAT = Backup_FileFormat, REJECT_TYPE = VALUE, REJECT_VALUE = 0) AS SELECT * FROM [@{pipeline().parameters.sql_BackupSchemaName}].[partitionedFunctions]');\nINSERT INTO [___ibCreateDb___].[ExportList] ([ExportList]) VALUES (@command);\nSET @command = CONCAT('CREATE EXTERNAL TABLE [___ibCreateDb___].[partitionedTables] WITH  (LOCATION=''/Backup/',@backupLocation,'/@{variables('infra_ServerNameAndDatabase')}/CreationScripts/[partitionedTables]/'', DATA_SOURCE = [@{pipeline().parameters.sql_BackupSchemaName}BackupBlobStorage], FILE_FORMAT = Backup_FileFormat, REJECT_TYPE = VALUE, REJECT_VALUE = 0) AS SELECT * FROM [@{pipeline().parameters.sql_BackupSchemaName}].[partitionedTables]');\nINSERT INTO [___ibCreateDb___].[ExportList] ([ExportList]) VALUES (@command);\nSET @command = CONCAT('CREATE EXTERNAL TABLE [___ibCreateDb___].[schemas] WITH  (LOCATION=''/Backup/',@backupLocation,'/@{variables('infra_ServerNameAndDatabase')}/CreationScripts/[Schemas]/'', DATA_SOURCE = [@{pipeline().parameters.sql_BackupSchemaName}BackupBlobStorage], FILE_FORMAT = Backup_FileFormat, REJECT_TYPE = VALUE, REJECT_VALUE = 0) AS SELECT * FROM [@{pipeline().parameters.sql_BackupSchemaName}].[schemas]');\nINSERT INTO [___ibCreateDb___].[ExportList] ([ExportList]) VALUES (@command);\nSET @command = CONCAT('CREATE EXTERNAL TABLE [___ibCreateDb___].[StoredProcedures] WITH  (LOCATION=''/Backup/',@backupLocation,'/@{variables('infra_ServerNameAndDatabase')}/CreationScripts/[StoredProcedures]/'', DATA_SOURCE = [@{pipeline().parameters.sql_BackupSchemaName}BackupBlobStorage], FILE_FORMAT = Backup_FileFormat, REJECT_TYPE = VALUE, REJECT_VALUE = 0) AS SELECT * FROM [@{pipeline().parameters.sql_BackupSchemaName}].[StoredProcedures]');\nINSERT INTO [___ibCreateDb___].[ExportList] ([ExportList]) VALUES (@command);\nSET @command = CONCAT('CREATE EXTERNAL TABLE [___ibCreateDb___].[TableColumnInfo] WITH  (LOCATION=''/Backup/',@backupLocation,'/@{variables('infra_ServerNameAndDatabase')}/CreationScripts/[TableColumnInfo]/'', DATA_SOURCE = [@{pipeline().parameters.sql_BackupSchemaName}BackupBlobStorage], FILE_FORMAT = Backup_FileFormat, REJECT_TYPE = VALUE, REJECT_VALUE = 0) AS SELECT * FROM [@{pipeline().parameters.sql_BackupSchemaName}].[TableColumnInfo]');\nINSERT INTO [___ibCreateDb___].[ExportList] ([ExportList]) VALUES (@command);\nSET @command = CONCAT('CREATE EXTERNAL TABLE [___ibCreateDb___].[tableRowCounts] WITH  (LOCATION=''/Backup/', @backupLocation,'/@{variables('infra_ServerNameAndDatabase')}/CreationScripts/[tableRowCounts]/'', DATA_SOURCE = [@{pipeline().parameters.sql_BackupSchemaName}BackupBlobStorage], FILE_FORMAT = Backup_FileFormat, REJECT_TYPE = VALUE, REJECT_VALUE = 0) AS SELECT * FROM [@{pipeline().parameters.sql_BackupSchemaName}].[tableRowCounts]');\nINSERT INTO [___ibCreateDb___].[ExportList] ([ExportList]) VALUES (@command);\nSET @command = CONCAT('CREATE EXTERNAL TABLE [___ibCreateDb___].[Tables] WITH  (LOCATION=''/Backup/',@backupLocation,'/@{variables('infra_ServerNameAndDatabase')}/CreationScripts/[Tables]/'', DATA_SOURCE = [@{pipeline().parameters.sql_BackupSchemaName}BackupBlobStorage], FILE_FORMAT = Backup_FileFormat, REJECT_TYPE = VALUE, REJECT_VALUE = 0) AS SELECT * FROM [@{pipeline().parameters.sql_BackupSchemaName}].[Tables]');\nINSERT INTO [___ibCreateDb___].[ExportList] ([ExportList]) VALUES (@command);\nSET @command = CONCAT('CREATE EXTERNAL TABLE [___ibCreateDb___].[TablesCcis] WITH  (LOCATION=''/Backup/',@backupLocation,'/@{variables('infra_ServerNameAndDatabase')}/CreationScripts/[TablesCcis]/'', DATA_SOURCE = [@{pipeline().parameters.sql_BackupSchemaName}BackupBlobStorage], FILE_FORMAT = Backup_FileFormat, REJECT_TYPE = VALUE, REJECT_VALUE = 0) AS SELECT * FROM [@{pipeline().parameters.sql_BackupSchemaName}].[TablesCcis]');\nINSERT INTO [___ibCreateDb___].[ExportList] ([ExportList]) VALUES (@command);\nSET @command = CONCAT('CREATE EXTERNAL TABLE [___ibCreateDb___].[TableStatInfo] WITH  (LOCATION=''/Backup/',@backupLocation,'/@{variables('infra_ServerNameAndDatabase')}/CreationScripts/[TableStatInfo]/'', DATA_SOURCE = [@{pipeline().parameters.sql_BackupSchemaName}BackupBlobStorage], FILE_FORMAT = Backup_FileFormat, REJECT_TYPE = VALUE, REJECT_VALUE = 0) AS SELECT * FROM [@{pipeline().parameters.sql_BackupSchemaName}].[TableStatInfo]');\nINSERT INTO [___ibCreateDb___].[ExportList] ([ExportList]) VALUES (@command);\nSET @command = CONCAT('CREATE EXTERNAL TABLE [___ibCreateDb___].[UserFunctions] WITH  (LOCATION=''/Backup/',@backupLocation,'/@{variables('infra_ServerNameAndDatabase')}/CreationScripts/[UserFunctions]/'', DATA_SOURCE = [@{pipeline().parameters.sql_BackupSchemaName}BackupBlobStorage], FILE_FORMAT = Backup_FileFormat, REJECT_TYPE = VALUE, REJECT_VALUE = 0) AS SELECT * FROM [@{pipeline().parameters.sql_BackupSchemaName}].[UserFunctions]');\nINSERT INTO [___ibCreateDb___].[ExportList] ([ExportList]) VALUES (@command);\nSET @command = CONCAT('CREATE EXTERNAL TABLE [___ibCreateDb___].[Views] WITH  (LOCATION=''/Backup/',@backupLocation,'/@{variables('infra_ServerNameAndDatabase')}/CreationScripts/[Views]/'', DATA_SOURCE = [@{pipeline().parameters.sql_BackupSchemaName}BackupBlobStorage], FILE_FORMAT = Backup_FileFormat, REJECT_TYPE = VALUE, REJECT_VALUE = 0) AS SELECT * FROM [@{pipeline().parameters.sql_BackupSchemaName}].[Views]');\nINSERT INTO [___ibCreateDb___].[ExportList] ([ExportList]) VALUES (@command);\n\nSELECT [ExportList] FROM [___ibCreateDb___].[ExportList];",
+                  "type": "Expression"
+                },
+                "queryTimeout": "02:00:00",
+                "partitionOption": "None"
+              },
+              "dataset": {
+                "referenceName": "set_blank",
+                "type": "DatasetReference",
+                "parameters": {
+                  "DSBackupServerName": {
+                    "value": "@pipeline().parameters.infra_BackupSqlServer",
+                    "type": "Expression"
+                  },
+                  "DSBackupDatabaseName": {
+                    "value": "@pipeline().parameters.synapse_DatabaseBackupName",
+                    "type": "Expression"
+                  },
+                  "DSBackupUsername": {
+                    "value": "@variables('security_BackupUserName')",
+                    "type": "Expression"
+                  },
+                  "DSBackupUserPassword": {
+                    "value": "@variables('security_BackupUserPassword')",
+                    "type": "Expression"
+                  }
+                }
+              },
+              "firstRowOnly": false
+            }
+          },
+          {
+            "name": "Backup re-creation scripts",
+            "type": "ForEach",
+            "dependsOn": [
+              {
+                "activity": "Get the re-creation scripts",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "items": {
+                "value": "@activity('Get the re-creation scripts').output.value",
+                "type": "Expression"
+              },
+              "activities": [
+                {
+                  "name": "Export creation table to BLOB",
+                  "type": "Lookup",
+                  "dependsOn": [
+                  ],
+                  "policy": {
+                    "timeout": "7.00:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": true,
+                    "secureInput": true
+                  },
+                  "userProperties": [
+                  ],
+                  "typeProperties": {
+                    "source": {
+                      "type": "SqlDWSource",
+                      "sqlReaderQuery": {
+                        "value": "@{item().ExportList}; SELECT 1;",
+                        "type": "Expression"
+                      },
+                      "queryTimeout": "02:00:00",
+                      "partitionOption": "None"
+                    },
+                    "dataset": {
+                      "referenceName": "set_blank",
+                      "type": "DatasetReference",
+                      "parameters": {
+                        "DSBackupServerName": {
+                          "value": "@pipeline().parameters.infra_BackupSqlServer",
+                          "type": "Expression"
+                        },
+                        "DSBackupDatabaseName": {
+                          "value": "@pipeline().parameters.synapse_DatabaseBackupName",
+                          "type": "Expression"
+                        },
+                        "DSBackupUsername": {
+                          "value": "@variables('security_BackupUserName')",
+                          "type": "Expression"
+                        },
+                        "DSBackupUserPassword": {
+                          "value": "@variables('security_BackupUserPassword')",
+                          "type": "Expression"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "name": "Get password from AKV for Control DB",
+            "type": "WebActivity",
+            "dependsOn": [
+              {
+                "activity": "Get backup info",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": true,
+              "secureInput": true
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "url": {
+                "value": "@pipeline().parameters.security_AKVControlPasswordUri",
+                "type": "Expression"
+              },
+              "method": "GET",
+              "headers": {
+              },
+              "authentication": {
+                "type": "MSI",
+                "resource": "https://vault.azure.net"
+              }
+            }
+          },
+          {
+            "name": "Get username from AKV for Control DB",
+            "description": "This user is only added to the db_writer role on the database to ensure security for other backups",
+            "type": "WebActivity",
+            "dependsOn": [
+              {
+                "activity": "Get backup info",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": true,
+              "secureInput": true
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "url": {
+                "value": "@pipeline().parameters.security_AKVControlUsernameUri",
+                "type": "Expression"
+              },
+              "method": "GET",
+              "headers": {
+              },
+              "authentication": {
+                "type": "MSI",
+                "resource": "https://vault.azure.net"
+              }
+            }
+          },
+          {
+            "name": "Set UserName",
+            "type": "SetVariable",
+            "dependsOn": [
+              {
+                "activity": "Get username from AKV for Control DB",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "variableName": "security_ControlUserName",
+              "value": {
+                "value": "@activity('Get username from AKV for Control DB').output.value",
+                "type": "Expression"
+              }
+            }
+          },
+          {
+            "name": "Set password",
+            "type": "SetVariable",
+            "dependsOn": [
+              {
+                "activity": "Get password from AKV for Control DB",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "variableName": "security_ControlPassword",
+              "value": {
+                "value": "@activity('Get password from AKV for Control DB').output.value",
+                "type": "Expression"
+              }
+            }
+          },
+          {
+            "name": "Update control database with backup info",
+            "type": "Lookup",
+            "dependsOn": [
+              {
+                "activity": "Set UserName",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              },
+              {
+                "activity": "Set password",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              },
+              {
+                "activity": "Get backup info",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              },
+              {
+                "activity": "Set control server name",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              },
+              {
+                "activity": "Set control database name",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              },
+              {
+                "activity": "Set row count that are not the same",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": true,
+              "secureInput": true
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "source": {
+                "type": "AzureSqlSource",
+                "sqlReaderQuery": {
+                  "value": "INSERT INTO [dbo].[backupControl] (\n[dataFactoryName],\n[pipelineName], \n[pipelineRunId],\n[backupPath], \n[rowCountsNotMatching],\n[completed],\n[startTime],\n[endTime],\n[backupId]) \n  VALUES\n\t(\n'@{pipeline().DataFactory}',\n'@{pipeline().Pipeline}', \n'@{pipeline().RunId}',\n'@{activity('Get backup info').output.firstRow.BackupLocation}', '@{variables('log_RowCountMismatch')}',\n1,\nGETDATE(),\nGETDATE(),\n0);\nSELECT 1;",
+                  "type": "Expression"
+                },
+                "queryTimeout": "02:00:00",
+                "partitionOption": "None"
+              },
+              "dataset": {
+                "referenceName": "set_ControlBlank",
+                "type": "DatasetReference",
+                "parameters": {
+                  "DSControlServerName": {
+                    "value": "@variables('infra_ControlServerName')",
+                    "type": "Expression"
+                  },
+                  "DSControlDatabase": {
+                    "value": "@variables('sql_ControlDatabase')",
+                    "type": "Expression"
+                  },
+                  "DSControlUserName": {
+                    "value": "@variables('security_ControlUserName')",
+                    "type": "Expression"
+                  },
+                  "DSControlPassword": {
+                    "value": "@variables('security_ControlPassword')",
+                    "type": "Expression"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "name": "Get backup info",
+            "type": "Lookup",
+            "dependsOn": [
+              {
+                "activity": "Backup re-creation scripts",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": true,
+              "secureInput": true
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "source": {
+                "type": "SqlDWSource",
+                "sqlReaderQuery": {
+                  "value": "SELECT TOP 1 [BackupLocation]\n  FROM [@{pipeline().parameters.sql_BackupSchemaName}].[BackupLocation]",
+                  "type": "Expression"
+                },
+                "queryTimeout": "02:00:00",
+                "partitionOption": "None"
+              },
+              "dataset": {
+                "referenceName": "set_blank",
+                "type": "DatasetReference",
+                "parameters": {
+                  "DSBackupServerName": {
+                    "value": "@pipeline().parameters.infra_BackupSqlServer",
+                    "type": "Expression"
+                  },
+                  "DSBackupDatabaseName": {
+                    "value": "@pipeline().parameters.synapse_DatabaseBackupName",
+                    "type": "Expression"
+                  },
+                  "DSBackupUsername": {
+                    "value": "@variables('security_BackupUserName')",
+                    "type": "Expression"
+                  },
+                  "DSBackupUserPassword": {
+                    "value": "@variables('security_BackupUserPassword')",
+                    "type": "Expression"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "name": "Get backup database user name from AKV",
+            "type": "WebActivity",
+            "dependsOn": [
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": true,
+              "secureInput": true
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "url": {
+                "value": "@pipeline().parameters.security_AKVBackupUserNameUri",
+                "type": "Expression"
+              },
+              "method": "GET",
+              "headers": {
+              },
+              "authentication": {
+                "type": "MSI",
+                "resource": "https://vault.azure.net"
+              }
+            }
+          },
+          {
+            "name": "Get backup database user password from AKV",
+            "type": "WebActivity",
+            "dependsOn": [
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": true,
+              "secureInput": true
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "url": {
+                "value": "@pipeline().parameters.security_AKVBackupUserPasswordUri",
+                "type": "Expression"
+              },
+              "method": "GET",
+              "headers": {
+              },
+              "authentication": {
+                "type": "MSI",
+                "resource": "https://vault.azure.net"
+              }
+            }
+          },
+          {
+            "name": "Set user name",
+            "type": "SetVariable",
+            "dependsOn": [
+              {
+                "activity": "Get backup database user name from AKV",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "variableName": "security_BackupUserName",
+              "value": {
+                "value": "@activity('Get backup database user name from AKV').output.value",
+                "type": "Expression"
+              }
+            }
+          },
+          {
+            "name": "Set backup user password",
+            "type": "SetVariable",
+            "dependsOn": [
+              {
+                "activity": "Get backup database user password from AKV",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "variableName": "security_BackupUserPassword",
+              "value": {
+                "value": "@activity('Get backup database user password from AKV').output.value",
+                "type": "Expression"
+              }
+            }
+          },
+          {
+            "name": "Get control server name from AKV",
+            "type": "WebActivity",
+            "dependsOn": [
+              {
+                "activity": "Get backup info",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": true,
+              "secureInput": true
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "url": {
+                "value": "@pipeline().parameters.security_AKVControlServerNameUri",
+                "type": "Expression"
+              },
+              "method": "GET",
+              "headers": {
+              },
+              "authentication": {
+                "type": "MSI",
+                "resource": "https://vault.azure.net"
+              }
+            }
+          },
+          {
+            "name": "Get control database name from AKV",
+            "type": "WebActivity",
+            "dependsOn": [
+              {
+                "activity": "Get backup info",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": true,
+              "secureInput": true
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "url": {
+                "value": "@pipeline().parameters.security_AKVControlDatabaseUri",
+                "type": "Expression"
+              },
+              "method": "GET",
+              "headers": {
+              },
+              "authentication": {
+                "type": "MSI",
+                "resource": "https://vault.azure.net"
+              }
+            }
+          },
+          {
+            "name": "Set control server name",
+            "type": "SetVariable",
+            "dependsOn": [
+              {
+                "activity": "Get control server name from AKV",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "variableName": "infra_ControlServerName",
+              "value": {
+                "value": "@activity('Get control server name from AKV').output.value",
+                "type": "Expression"
+              }
+            }
+          },
+          {
+            "name": "Set control database name",
+            "type": "SetVariable",
+            "dependsOn": [
+              {
+                "activity": "Get control database name from AKV",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "variableName": "sql_ControlDatabase",
+              "value": {
+                "value": "@activity('Get control database name from AKV').output.value",
+                "type": "Expression"
+              }
+            }
+          },
+          {
+            "name": "Get the row count commands",
+            "type": "Lookup",
+            "dependsOn": [
+              {
+                "activity": "Backup Tables",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": true,
+              "secureInput": true
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "source": {
+                "type": "SqlDWSource",
+                "sqlReaderQuery": {
+                  "value": "SELECT \n\tCONCAT('UPDATE [@{pipeline().parameters.sql_BackupSchemaName}].[tableRowCounts] SET [InternalRowCount] = (SELECT  COUNT(*) FROM ',[TableName], ')',\n\t', ExternalRowCount = (SELECT  COUNT(*) FROM ', ExternalTable ,')',\n\t' WHERE [TableName] = ''', [TableName], ''' AND [ExternalTable] = ''', ExternalTable, '''' ) AS RowCountCommand\nFROM [@{pipeline().parameters.sql_BackupSchemaName}].[tableRowCounts]",
+                  "type": "Expression"
+                },
+                "queryTimeout": "02:00:00",
+                "partitionOption": "None"
+              },
+              "dataset": {
+                "referenceName": "set_blank",
+                "type": "DatasetReference",
+                "parameters": {
+                  "DSBackupServerName": {
+                    "value": "@pipeline().parameters.infra_BackupSqlServer",
+                    "type": "Expression"
+                  },
+                  "DSBackupDatabaseName": {
+                    "value": "@pipeline().parameters.synapse_DatabaseBackupName",
+                    "type": "Expression"
+                  },
+                  "DSBackupUsername": {
+                    "value": "@variables('security_BackupUserName')",
+                    "type": "Expression"
+                  },
+                  "DSBackupUserPassword": {
+                    "value": "@variables('security_BackupUserPassword')",
+                    "type": "Expression"
+                  }
+                }
+              },
+              "firstRowOnly": false
+            }
+          },
+          {
+            "name": "Update rowcounts",
+            "type": "ForEach",
+            "dependsOn": [
+              {
+                "activity": "Get the row count commands",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "items": {
+                "value": "@activity('Get the row count commands').output.value",
+                "type": "Expression"
+              },
+              "activities": [
+                {
+                  "name": "Update row count",
+                  "type": "Lookup",
+                  "dependsOn": [
+                  ],
+                  "policy": {
+                    "timeout": "7.00:00:00",
+                    "retry": 0,
+                    "retryIntervalInSeconds": 30,
+                    "secureOutput": true,
+                    "secureInput": true
+                  },
+                  "userProperties": [
+                  ],
+                  "typeProperties": {
+                    "source": {
+                      "type": "SqlDWSource",
+                      "sqlReaderQuery": {
+                        "value": "@{item().RowCountCommand}; SELECT 1;",
+                        "type": "Expression"
+                      },
+                      "queryTimeout": "02:00:00",
+                      "partitionOption": "None"
+                    },
+                    "dataset": {
+                      "referenceName": "set_blank",
+                      "type": "DatasetReference",
+                      "parameters": {
+                        "DSBackupServerName": {
+                          "value": "@pipeline().parameters.infra_BackupSqlServer",
+                          "type": "Expression"
+                        },
+                        "DSBackupDatabaseName": {
+                          "value": "@pipeline().parameters.synapse_DatabaseBackupName",
+                          "type": "Expression"
+                        },
+                        "DSBackupUsername": {
+                          "value": "@variables('security_BackupUserName')",
+                          "type": "Expression"
+                        },
+                        "DSBackupUserPassword": {
+                          "value": "@variables('security_BackupUserPassword')",
+                          "type": "Expression"
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
+            }
+          },
+          {
+            "name": "Check if the row counts match",
+            "type": "Lookup",
+            "dependsOn": [
+              {
+                "activity": "Update rowcounts",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "policy": {
+              "timeout": "7.00:00:00",
+              "retry": 0,
+              "retryIntervalInSeconds": 30,
+              "secureOutput": true,
+              "secureInput": true
+            },
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "source": {
+                "type": "SqlDWSource",
+                "sqlReaderQuery": {
+                  "value": "SELECT CAST(COUNT(*) AS NVARCHAR(10)) AS NotMatching FROM [@{pipeline().parameters.sql_BackupSchemaName}].[tableRowCounts] WHERE [InternalRowCount] <> [ExternalRowCount]",
+                  "type": "Expression"
+                },
+                "queryTimeout": "02:00:00",
+                "partitionOption": "None"
+              },
+              "dataset": {
+                "referenceName": "set_blank",
+                "type": "DatasetReference",
+                "parameters": {
+                  "DSBackupServerName": {
+                    "value": "@pipeline().parameters.infra_BackupSqlServer",
+                    "type": "Expression"
+                  },
+                  "DSBackupDatabaseName": {
+                    "value": "@pipeline().parameters.synapse_DatabaseBackupName",
+                    "type": "Expression"
+                  },
+                  "DSBackupUsername": {
+                    "value": "@variables('security_BackupUserName')",
+                    "type": "Expression"
+                  },
+                  "DSBackupUserPassword": {
+                    "value": "@variables('security_BackupUserPassword')",
+                    "type": "Expression"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "name": "Set row count that are not the same",
+            "type": "SetVariable",
+            "dependsOn": [
+              {
+                "activity": "Check if the row counts match",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "variableName": "log_RowCountMismatch",
+              "value": {
+                "value": "@activity('Check if the row counts match').output.firstRow.NotMatching",
+                "type": "Expression"
+              }
+            }
+          },
+          {
+            "name": "Set Server name and backup name",
+            "type": "SetVariable",
+            "dependsOn": [
+              {
+                "activity": "Set backup user password",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              },
+              {
+                "activity": "Set user name",
+                "dependencyConditions": [
+                  "Succeeded"
+                ]
+              }
+            ],
+            "userProperties": [
+            ],
+            "typeProperties": {
+              "variableName": "infra_ServerNameAndDatabase",
+              "value": {
+                "value": "@concat(pipeline().parameters.infra_OriginalSqlServerName, '/', pipeline().parameters.synapse_DatabaseToBeBackedUp)",
+                "type": "Expression"
+              }
+            }
+          }
+        ],
+        "parameters": {
+          "sql_BackupSchemaName": {
+            "type": "securestring"
+          },
+          "security_AKVControlPasswordUri": {
+            "type": "securestring"
+          },
+          "security_AKVControlUsernameUri": {
+            "type": "securestring"
+          },
+          "infra_BackupSqlServer": {
+            "type": "securestring"
+          },
+          "synapse_DatabaseBackupName": {
+            "type": "securestring"
+          },
+          "security_AKVBackupUserNameUri": {
+            "type": "securestring"
+          },
+          "security_AKVBackupUserPasswordUri": {
+            "type": "securestring"
+          },
+          "security_AKVControlServerNameUri": {
+            "type": "securestring"
+          },
+          "security_AKVControlDatabaseUri": {
+            "type": "securestring"
+          },
+          "synapse_DatabaseToBeBackedUp": {
+            "type": "securestring"
+          },
+          "infra_OriginalSqlServerName": {
+            "type": "securestring"
+          }
+        },
+        "variables": {
+          "security_ControlUserName": {
+            "type": "String"
+          },
+          "security_ControlPassword": {
+            "type": "String"
+          },
+          "infra_ControlServerName": {
+            "type": "String"
+          },
+          "sql_ControlDatabase": {
+            "type": "String"
+          },
+          "security_BackupUserName": {
+            "type": "String"
+          },
+          "security_BackupUserPassword": {
+            "type": "String"
+          },
+          "log_RowCountMismatch": {
+            "type": "String"
+          },
+          "infra_ServerNameAndDatabase": {
+            "type": "String"
+          }
+        },
+        "folder": {
+          "name": "Backup DW"
+        },
+        "annotations": [
+        ]
+      },
+      "dependsOn": [
+        "[concat(variables('factoryId'), '/datasets/set_blank')]",
+        "[concat(variables('factoryId'), '/datasets/set_ControlBlank')]"
+      ]
+    },
+    {
+      "name": "[concat(parameters('factoryName'), '/set_blank')]",
+      "type": "Microsoft.DataFactory/factories/datasets",
+      "apiVersion": "2018-06-01",
+      "properties": {
+        "linkedServiceName": {
+          "referenceName": "[parameters('conn_BackupServer')]",
+          "type": "LinkedServiceReference",
+          "parameters": {
+            "BackupServerName": {
+              "value": "@dataset().DSBackupServerName",
+              "type": "Expression"
+            },
+            "BackupDatabaseName": {
+              "value": "@dataset().DSBackupDatabaseName",
+              "type": "Expression"
+            },
+            "BackupServerUserName": {
+              "value": "@dataset().DSBackupUsername",
+              "type": "Expression"
+            },
+            "BackupUserPassword": {
+              "value": "@dataset().DSBackupUserPassword",
+              "type": "Expression"
+            }
+          }
+        },
+        "parameters": {
+          "DSBackupServerName": {
+            "type": "string",
+            "defaultValue": "ibdwtestbackupserver.database.windows.net"
+          },
+          "DSBackupDatabaseName": {
+            "type": "string"
+          },
+          "DSBackupUsername": {
+            "type": "string"
+          },
+          "DSBackupUserPassword": {
+            "type": "string"
+          }
+        },
+        "annotations": [
+        ],
+        "type": "AzureSqlDWTable",
+        "schema": [
+        ],
+        "typeProperties": {
+          "schema": "sys",
+          "table": "schemas"
+        }
+      },
+      "dependsOn": [
+      ]
+    },
+    {
+      "name": "[concat(parameters('factoryName'), '/set_ControlBlank')]",
+      "type": "Microsoft.DataFactory/factories/datasets",
+      "apiVersion": "2018-06-01",
+      "properties": {
+        "linkedServiceName": {
+          "referenceName": "[parameters('conn_ControlDb')]",
+          "type": "LinkedServiceReference",
+          "parameters": {
+            "ControlServerName": {
+              "value": "@dataset().DSControlServerName",
+              "type": "Expression"
+            },
+            "ControlDatabase": {
+              "value": "@dataset().DSControlDatabase",
+              "type": "Expression"
+            },
+            "ControlUserName": {
+              "value": "@dataset().DSControlUserName",
+              "type": "Expression"
+            },
+            "ControlPassword": {
+              "value": "@dataset().DSControlPassword",
+              "type": "Expression"
+            }
+          }
+        },
+        "parameters": {
+          "DSControlServerName": {
+            "type": "string"
+          },
+          "DSControlDatabase": {
+            "type": "string"
+          },
+          "DSControlUserName": {
+            "type": "string"
+          },
+          "DSControlPassword": {
+            "type": "string"
+          }
+        },
+        "annotations": [
+        ],
+        "type": "AzureSqlTable",
+        "schema": [
+        ],
+        "typeProperties": {
+          "schema": "dbo",
+          "table": "null"
+        }
+      },
+      "dependsOn": [
+      ]
+    }
+  ]
+}

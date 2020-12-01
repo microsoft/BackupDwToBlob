@@ -12,7 +12,7 @@
     }
   },
   "documentation": "https://github.com/microsoft/BackupDwToBlob",
-  "author": "moblak@microsoft.com",
+  "author": "Mornè Blake",
   "annotations": [
     "Datawarehouse backup",
     "Synapse DW Backup"
