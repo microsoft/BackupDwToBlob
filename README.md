@@ -4,7 +4,7 @@
 
 The inspiration for this was to create an Azure Data Factory set of pipelines to backup an Azure Synapse Provisioned Pool database to Azure BLOB storage in such a way that the database will look the same when restored and return the same result from the same query over the database, or as closely as is possible.
 
-The additional idea is to create scripts to recreate the Azure SQL Provisioned Pool database to about the sames state as it was before, or as close as is possible.
+The additional idea is to create scripts to recreate the Azure SQL Provisioned Pool database to about the same state as it was before, or as close as is possible.
 
 > **Design Principles**
 >
