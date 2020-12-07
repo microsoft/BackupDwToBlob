@@ -16,7 +16,7 @@ The following are targeted to be backed up (if not excluded by a schema):
 
 * User Objects:
   * User Schemas
-  * User Tables (HASH / Round Robin / Replicated)
+  * User Tables (Hash / Round Robin / Replicated)
   * User Views (This includes Materialized Views)
   * User Stored Procedures
   * User Defined Functions
@@ -36,7 +36,7 @@ The following are targeted to be backed up (if not excluded by a schema):
 
 ## SELECT 1 - What's up with that?
 
-I did not want to go down the injecting stored procedures into the Azure Synapse Provisioned Pool database, I found it a bit limiting and decided to user _Lookups_ in the pipelines to execute T-SQL on the database, but a lookup always requires a result set. To enable me to use the _lookup_ I ended up adding 
+I did not want to go down the injecting stored procedures into the Azure Synapse Provisioned Pool database, I found it a bit limiting and decided to use _Lookups_ in the pipelines to execute T-SQL on the database, but a lookup always requires a result set. To enable me to use the _lookup_ I ended up adding
 
 ``` SQL
 SELECT 1;
@@ -95,24 +95,22 @@ CREATE TABLE [dbo].[backupControl](
 GO
 ```
 
-Use this table to track the backup location for the data warehouse.
-
 ### Azure Key Vault
 
 Azure Key Vault (AKV) is used to secure sensitive information for the complete backup process, and maybe I did go a little overboard with adding control database and server name to the Key Vault, but once you have a pattern established you follow it to the end!
 
 1. Add the MSI for ADF to your Key Vault as a Managed Applications Reader.
 2. Add the required secrets
-   * BackupBlobStorageLocation
-   * BackupDatabaseScopedCredentials
+   * BackupBlobStorageLocation - The Azure BLOB location for the backup files
+   * BackupDatabaseScopedCredentials 
    * BackupDatabaseScopedCredentialsSecret
    * BackupServerMasterKey
-   * BackupServerUserName
-   * BackupServerUserPassword
-   * SqlControlDatabase
-   * SqlControlPassword
-   * SqlControlServerName
+   * BackupServerUserName - The user name for the SQL user that will be used to login to the Azure Synapse Provisioned Pool database
+   * BackupServerUserPassword - The password for the SQL user that will be used to login to the Azure Synapse Provisioned Pool database
+   * SqlControlDatabase - The name of the Azure SQL control database
    * SqlControlUserName
+   * SqlControlPassword 
+   * SqlControlServerName
 
 ---
 
@@ -123,6 +121,8 @@ Azure Key Vault (AKV) is used to secure sensitive information for the complete b
 ---
 
 ![Main Pipeline](https://ibimages.blob.core.windows.net/public/BackupToBlob/MainPipeline.png)
+
+!TODO - Fix Image!
 
 This pipeline is used as the master pipeline to execute all of the subsequent steps, from beginning to end. It simply has 5 objects, all 5 being Execute Pipeline.
 
@@ -136,7 +136,7 @@ This pipeline is used as the master pipeline to execute all of the subsequent st
 
 This pipeline is used to check if the backup SQL Azure Server exist, and if not, it will create it. Additionally it will add the Azure Data Factory MSI as the domain admin for this SQL Server (Only if this pipeline creates the server) and allow all Azure services to be able to connect to it.
 
-> If the server already exist, then none of the below values would be applied.
+> **Please Note**: If the server already exist, then none of the values would be applied and you have to ensure that all settings on the server is correct!
 
 #### Step 1 Parameters
 
@@ -155,7 +155,7 @@ This pipeline is used to check if the backup SQL Azure Server exist, and if not,
 | security_TenantId | SecureString | The tenant ID that hosts the above subscription |
 
 1. The server cannot be created without temporary user name and password, these values can be retrieved from Key Vault.
-2. The infra_Tags must be a valid JSON string in the following format: "tagKey1": "tag-value-1", "tagKey2": "tag-value-2". This value should be left blank to skip adding tags to the server
+2. The **infra_Tags** must be a valid JSON string in the following format: "tagKey1": "tag-value-1", "tagKey2": "tag-value-2". This value should be left blank to skip adding tags to the server
 
 ---
 
@@ -182,7 +182,6 @@ This pipeline will restore the latest restore point from the specified server an
 | synapse_BackupSku | SecureString | The name that the restored database will have.  |
 | synapse_DatabaseToBeBackedUp | SecureString | The name of the database that should be restored  |
 | synapse_DatabaseBackupName | SecureString | The name that the restored database will have.  |
-
 
 1. Valid values for **synapse_BackupSku** is DW100c, DW200c, DW300c, DW500c, DW1000c, DW1500c and so forth, verify the sizes on the Microsoft Documentation page. (Note that the size will have a direct impact on how long a backup takes and the cost of it)
 2. Additionally this only covers Gen2.
@@ -211,34 +210,32 @@ The following will be done to the **Azure SQL Server**:
 1. Create a Master Key, if it doesn't exist already.
 
 ``` SQL
-IF (SELECT COUNT(*) FROM sys.symmetric_keys WHERE [name] LIKE '%DatabaseMasterKey%') < 1
-BEGIN
-    CREATE MASTER KEY ENCRYPTION BY PASSWORD = '@{activity('Get password from AKV').output.value}';
+--Check if Master Key Encryption is enabled
+IF NOT EXISTS (SELECT * FROM sys.symmetric_keys WHERE [name] LIKE '%DatabaseMasterKey%')BEGIN
+    --Enable Master Key Encryption with password
+    CREATE MASTER KEY ENCRYPTION BY PASSWORD = 'A_strong_password_that_should_be_retrieved_from_KeyVault';
 END
 ```
 
 The following will be added to the **Azure Synapse Provisioned Pool database**:
 
-1. Create 2 backup schemas, the first one is user defined (or not)
+1. Create 2 backup schemas, the first one can be user defined
 2. Set Database Scoped Credentials (DSC)
 3. Create the external data source from the BLOB storage path defined
 4. Create external file format (The default file format created is parquet, but you can change this step to be any valid file format. Parquet will be compressed, but is slower than CSV for export and import.)
 
 ``` SQL
 --Create parquet File Format
-CREATE EXTERNAL FILE FORMAT Backup_PARQUET_FileFormat  
+CREATE EXTERNAL FILE FORMAT Backup_FileFormat  
 WITH (  
-    FORMAT_TYPE = PARQUET  
-      , DATA_COMPRESSION = 'org.apache.hadoop.io.compress.SnappyCodec'  
-    );
+  FORMAT_TYPE = PARQUET  
+    , DATA_COMPRESSION = 'org.apache.hadoop.io.compress.SnappyCodec'  
+  );
 ```
-
-> **Kind of note to self...**
-> Would be easier to change the external file name to Backup_FileFormat to make it easier to change the file type.
 
 #### Step 3 Parameters
 
-> All parameters are required and don't have any default values
+> All parameters are required and don't have any default values (Except for one)
 
 | Parameter Name | Type | More Info |
 | --- | --- | --- |
@@ -253,12 +250,10 @@ WITH (
 | security_AKVBackupStorageLocationUri | SecureString | --- |
 | sql_SkipSchemas | String | **Not implemented!** A comma delimited valid list of schemas that should be skipped in the backup process. |
 
-> **Kind of note to self...**
-> Will probably have to add a parameter with which Schemas can be skipped, e.g. 'Staging', 'Temp' or something like that... Never mind I added the parameter, but they scripts has to be yet modified.
 > **Note to Laurence**
 > The part below is me slaughtering my way through the English language...
 
-Make sure that should you change the default backup schema, don't use a schema that is in use by the database itself as no object in this schema will be backed up. And, yes, I hear that right now you might not have any object in there that should be backed up, but we all know that some changes happen and objects are moved or added in the future. Don't be that guy!
+If you decide to change the default backup schema, make sure that you don't use a schema that already exist in the database, as no object in this schema will be backed up.
 
 ---
 
